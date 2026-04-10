@@ -52,6 +52,24 @@ from typing import Any
 
 log = logging.getLogger("cookiefooocus.filter")
 
+# ── Observability (structured JSON events) ─────────────────────────────────────
+try:
+    from modules.observability.structured_log import log_decision, log_error
+    _obs_available = True
+except ImportError:
+    _obs_available = False
+    def log_decision(**_kw): pass
+    def log_error(**_kw): pass
+
+# ── Learning engine (on-device bypass logging) ─────────────────────────────────
+try:
+    from modules.learning_engine import log_blocked_prompt, log_borderline_prompt
+    _learning_available = True
+except ImportError:
+    _learning_available = False
+    def log_blocked_prompt(**_kw): pass
+    def log_borderline_prompt(**_kw): pass
+
 # ── Policy loader ──────────────────────────────────────────────────────────────
 _POLICY_PATH = Path(__file__).parent.parent / "safety_policy.json"
 _policy_lock = threading.Lock()
@@ -498,49 +516,63 @@ class PromptFilter:
 
         _step("normalise", status="ok", length=len(n))
 
+        def _block(category: str, severity: Severity, score: float = 0.0,
+                   reasons: list = None) -> FilterResult:
+            """Emit audit + observability + learning event, return block result."""
+            _reasons = reasons or [category]
+            _audit(user_id, "block", category, prompt[:200])
+            log_decision(
+                module="moderation",
+                decision="block",
+                reasons=_reasons,
+                score=score,
+                category=category,
+                user_id=user_id,
+                trace=tr if _trace_enabled() else None,
+            )
+            log_blocked_prompt(
+                prompt=prompt,
+                category=category,
+                reasons=_reasons,
+                score=score,
+                user_id=user_id,
+            )
+            return FilterResult(
+                allowed=False, severity=severity,
+                reason=_BLOCKED_REASON, category=category,
+                score=score, trace=tr,
+            )
+
         # [A] Hard block patterns (pre-compiled)
         for rx, category, severity in _BLOCK_COMPILED:
             if rx.search(n):
                 _step("hard_block", category=category, severity=severity.value, triggered=True)
-                _audit(user_id, "block", category, prompt[:200])
                 if severity == Severity.CRITICAL:
                     _write_critical_alert(category, user_id, prompt[:500])
-                return FilterResult(
-                    allowed=False, severity=severity,
-                    reason=_BLOCKED_REASON, category=category, trace=tr,
-                )
+                return _block(category, severity, reasons=["hard_block", category])
         _step("hard_block", triggered=False)
 
         # [B] 18+ adult filter — always enabled, cannot be disabled (pre-compiled)
         for rx, category in _ADULT_COMPILED:
             if rx.search(n):
                 _step("adult_filter", category=category, triggered=True)
-                _audit(user_id, "block", category, prompt[:200])
-                return FilterResult(
-                    allowed=False, severity=Severity.BLOCK,
-                    reason=_BLOCKED_REASON, category=category, trace=tr,
-                )
+                return _block(category, Severity.BLOCK, reasons=["adult_filter", category])
         _step("adult_filter", triggered=False)
 
         # [C] Intent patterns (pre-compiled)
         for rx, category in _INTENT_COMPILED:
             if rx.search(n):
                 _step("intent", category=category, triggered=True)
-                _audit(user_id, "block", category, prompt[:200])
-                return FilterResult(
-                    allowed=False, severity=Severity.BLOCK,
-                    reason=_BLOCKED_REASON, category=category, trace=tr,
-                )
+                return _block(category, Severity.BLOCK, reasons=["intent_pattern", category])
         _step("intent", triggered=False)
 
         # [D] Fuzzy keyword detection
         for word, threshold in FUZZY_KEYWORDS:
             if _fuzzy_contains(n, word, threshold):
                 _step("fuzzy", word=word, triggered=True)
-                _audit(user_id, "block", f"fuzzy:{word}", prompt[:200])
-                return FilterResult(
-                    allowed=False, severity=Severity.BLOCK,
-                    reason=_BLOCKED_REASON, category=f"fuzzy:{word}", trace=tr,
+                return _block(
+                    f"fuzzy:{word}", Severity.BLOCK,
+                    reasons=["fuzzy_match", f"fuzzy:{word}"],
                 )
         _step("fuzzy", triggered=False)
 
@@ -548,22 +580,21 @@ class PromptFilter:
         score = sum(pts for rx, pts in _RISK_COMPILED if rx.search(n))
         _step("risk_score", score=score, threshold=self.RISK_THRESHOLD)
         if score >= self.RISK_THRESHOLD:
-            _audit(user_id, "block", f"risk-score:{score}", prompt[:200])
-            return FilterResult(
-                allowed=False, severity=Severity.BLOCK,
-                reason=_BLOCKED_REASON, category="risk-score",
-                score=float(score), trace=tr,
+            return _block(
+                "risk-score", Severity.BLOCK, score=float(score),
+                reasons=["risk_score_threshold"],
             )
+        # Log near-threshold prompts for pattern analysis
+        elif score >= self.RISK_THRESHOLD * 0.7:
+            log_borderline_prompt(prompt=prompt, score=float(score), user_id=user_id)
 
         # [F] ML injection classifier
         ml = _ml_score(n)
         _step("ml_classifier", score=round(ml, 4), threshold=self.ML_THRESHOLD)
         if ml >= self.ML_THRESHOLD:
-            _audit(user_id, "block", "prompt-injection-ml", prompt[:200])
-            return FilterResult(
-                allowed=False, severity=Severity.BLOCK,
-                reason=_BLOCKED_REASON, category="prompt-injection",
-                score=ml, trace=tr,
+            return _block(
+                "prompt-injection", Severity.BLOCK, score=ml,
+                reasons=["ml_classifier"],
             )
 
         # [G] Warn patterns (pre-compiled)
@@ -571,6 +602,11 @@ class PromptFilter:
             if rx.search(n):
                 _step("warn", category=category, triggered=True)
                 _audit(user_id, "warn", category, prompt[:200])
+                log_decision(
+                    module="moderation", decision="warn",
+                    reasons=["warn_pattern", category],
+                    category=category, user_id=user_id,
+                )
                 return FilterResult(
                     allowed=True, severity=Severity.WARN,
                     reason=_WARN_REASON, category=category,
@@ -578,6 +614,10 @@ class PromptFilter:
                 )
 
         _step("result", decision="allow")
+        log_decision(
+            module="moderation", decision="allow",
+            reasons=[], user_id=user_id,
+        )
         return FilterResult(allowed=True, severity=Severity.SAFE, trace=tr)
 
 

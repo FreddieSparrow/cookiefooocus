@@ -1,0 +1,13 @@
+{
+  "_comment": "Cookie-Fooocus security manifest. Do not edit manually — use 'python update_manifest.py' to regenerate after updating safety files.",
+  "manifest_version": "1.0.0",
+  "update_channel": "stable",
+  "files": {
+    "modules/content_filter.py": {
+      "version": "3.0.0",
+      "sha256": "6c491acd29c90b5dcc9d8317df170b938d8e95be3d835a1473c83484ed778959",
+      "required": true,
+      "description": "Core safety filter — must not be modified"
+    }
+  }
+}

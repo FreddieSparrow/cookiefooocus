@@ -20,23 +20,20 @@ if "GRADIO_SERVER_PORT" not in os.environ:
 # (via SHA-256), and up to date with the upstream repository before launch.
 # If it fails any check, startup is aborted.
 import hashlib
-import urllib.request
-import urllib.error
+import json
 
-_FILTER_PATH = os.path.join(root, "modules", "content_filter.py")
-_FILTER_REMOTE = (
-    "https://raw.githubusercontent.com/FreddieSparrow/cookiefooocus/main/"
-    "modules/content_filter.py"
-)
+_MANIFEST_PATH = os.path.join(root, "security_manifest.json")
 
 
 def _abort(reason: str) -> None:
     print(f"\n{'='*60}")
     print(f"  STARTUP BLOCKED — {reason}")
     print(f"{'='*60}")
-    print("  content_filter.py is required and must not be modified.")
-    print("  To restore it, run:")
+    print("  A required safety file is missing or has been tampered with.")
+    print("  To restore, run:")
     print("    git checkout modules/content_filter.py")
+    print("  Then regenerate the manifest:")
+    print("    python update_manifest.py")
     print(f"{'='*60}\n")
     sys.exit(1)
 
@@ -49,35 +46,65 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _verify_content_filter() -> None:
-    # 1. Must exist
-    if not os.path.isfile(_FILTER_PATH):
-        _abort("modules/content_filter.py is missing")
+def _verify_safety_files() -> None:
+    """
+    Verify safety-critical files against security_manifest.json (offline, fast).
+    The manifest is updated by running 'python update_manifest.py' after
+    legitimate changes — no internet connection required at boot.
+    """
+    if not os.path.isfile(_MANIFEST_PATH):
+        print("[Cookie-Fooocus] WARNING: security_manifest.json missing — "
+              "run 'python update_manifest.py' to create it.")
+        # Fallback: just check the filter exists
+        if not os.path.isfile(os.path.join(root, "modules", "content_filter.py")):
+            _abort("modules/content_filter.py is missing")
+        print("[Cookie-Fooocus] content_filter.py present (manifest check skipped).")
+        return
 
-    local_hash = _sha256_file(_FILTER_PATH)
-
-    # 2. Check against upstream (non-fatal if offline — warns only)
     try:
-        req = urllib.request.Request(_FILTER_REMOTE, headers={"User-Agent": "cookiefooocus"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            remote_bytes = resp.read()
-        remote_hash = hashlib.sha256(remote_bytes).hexdigest()
-
-        if local_hash != remote_hash:
-            _abort(
-                "modules/content_filter.py has been modified or is out of date.\n"
-                f"  Local  SHA-256: {local_hash}\n"
-                f"  Remote SHA-256: {remote_hash}"
-            )
-        print("[Cookie-Fooocus] content_filter.py verified against upstream.")
-    except urllib.error.URLError:
-        # Offline — skip remote check, local file still required
-        print("[Cookie-Fooocus] Offline — skipping remote content_filter.py check.")
+        manifest = json.loads(open(_MANIFEST_PATH).read())
     except Exception as exc:
-        print(f"[Cookie-Fooocus] content_filter.py remote check failed ({exc}) — continuing.")
+        print(f"[Cookie-Fooocus] WARNING: Could not parse security_manifest.json: {exc}")
+        return
+
+    files = manifest.get("files", {})
+    all_ok = True
+
+    for rel_path, meta in files.items():
+        abs_path = os.path.join(root, rel_path)
+        required = meta.get("required", False)
+
+        if not os.path.isfile(abs_path):
+            if required:
+                _abort(f"{rel_path} is missing (required by security manifest)")
+            print(f"[Cookie-Fooocus] WARNING: {rel_path} missing (not required).")
+            continue
+
+        expected_hash = meta.get("sha256", "")
+        if not expected_hash:
+            continue
+
+        actual_hash = _sha256_file(abs_path)
+        if actual_hash != expected_hash:
+            if required:
+                _abort(
+                    f"{rel_path} has been modified.\n"
+                    f"  Manifest SHA-256: {expected_hash}\n"
+                    f"  Actual   SHA-256: {actual_hash}\n"
+                    "  If this is a legitimate update, run: python update_manifest.py"
+                )
+            print(f"[Cookie-Fooocus] WARNING: {rel_path} hash mismatch (non-required).")
+            all_ok = False
+        else:
+            ver = meta.get("version", "?")
+            print(f"[Cookie-Fooocus] ✓ {rel_path} v{ver} verified.")
+
+    if all_ok:
+        channel = manifest.get("update_channel", "stable")
+        print(f"[Cookie-Fooocus] Safety manifest OK (channel: {channel}).")
 
 
-_verify_content_filter()
+_verify_safety_files()
 # ─────────────────────────────────────────────────────────────────────────────
 
 import platform
