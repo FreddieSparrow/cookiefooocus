@@ -1,0 +1,61 @@
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+fooocus_env/
+cookiefooocus_env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets and auth
+auth.json
+*.secret
+
+# Model weights and checkpoints (too large for git)
+*.ckpt
+*.safetensors
+*.pth
+*.pt
+*.bin
+models/
+outputs/
+temp/
+
+# Logs
+*.log
+ai-audit.jsonl
+alerts/
+
+# IDE
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+Thumbs.db
+ehthumbs.db
+desktop.ini

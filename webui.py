@@ -21,7 +21,14 @@ from extras.inpaint_mask import SAMOptions
 from modules.sdxl_styles import legal_style_names
 from modules.private_logger import get_current_html_path
 from modules.ui_gradio_extensions import reload_javascript
-from modules.auth import auth_enabled, check_auth
+# Auth is only loaded in --server mode. In local mode the auth module is never
+# imported so the system is identical to upstream Fooocus.
+_server_mode = args_manager.args.server
+if _server_mode:
+    from modules.auth import auth_enabled, check_auth
+else:
+    auth_enabled = False
+    check_auth = None
 from modules.util import is_json
 
 def get_task(*args):
@@ -156,6 +163,8 @@ shared.gradio_root = gr.Blocks(title=title).queue(
 )
 
 with shared.gradio_root:
+    gr.HTML(modules.html.HEADER_HTML)
+    gr.HTML(modules.html.TIPS_HTML)
     currentTask = gr.State(worker.AsyncTask(args=[]))
     inpaint_engine_state = gr.State('empty')
     with gr.Row():
@@ -1113,6 +1122,8 @@ with shared.gradio_root:
                 .then(fn=style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
                 .then(lambda: None, _js='()=>{refresh_style_localization();}')
 
+    gr.HTML(modules.html.LEGAL_HTML)
+
 def dump_default_english_config():
     from modules.localization import dump_english_config
     dump_english_config(grh.all_components)
@@ -1122,21 +1133,23 @@ def dump_default_english_config():
 
 _is_public = bool(args_manager.args.share or args_manager.args.listen)
 
-# Safety: if the server will be network-accessible, require auth.
-# Silently enable auth even if the user forgot --share.
-if _is_public and not auth_enabled:
-    import logging as _log
-    _log.getLogger("cookiefooocus.webui").warning(
-        "[security] Server exposed to network but no auth configured. "
-        "Create auth-example.json with user/pass to enable authentication."
-    )
+if _server_mode:
+    print("[Cookie-Fooocus] Server mode active — authentication and rate limiting enabled.")
+    if not auth_enabled:
+        import logging as _log
+        _log.getLogger("cookiefooocus.webui").warning(
+            "[security] --server flag set but no auth.json found. "
+            "Create auth.json with user credentials to enable authentication."
+        )
+else:
+    print("[Cookie-Fooocus] Local mode — running as single-user tool (no login required).")
 
 shared.gradio_root.launch(
     inbrowser=args_manager.args.in_browser,
     server_name=args_manager.args.listen,
     server_port=args_manager.args.port,
     share=False,   # Never auto-create a public Gradio tunnel — use --share flag intentionally
-    auth=check_auth if _is_public and auth_enabled else None,
+    auth=check_auth if _server_mode and auth_enabled else None,
     allowed_paths=[modules.config.path_outputs],
     blocked_paths=[constants.AUTH_FILENAME],
     show_error=False,   # Don't leak stack traces to the browser

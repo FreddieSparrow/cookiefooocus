@@ -42,13 +42,46 @@ import time
 import unicodedata
 import base64
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from functools import lru_cache
 from math import log2
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("cookiefooocus.filter")
+
+# ── Policy loader ──────────────────────────────────────────────────────────────
+_POLICY_PATH = Path(__file__).parent.parent / "safety_policy.json"
+_policy_lock = threading.Lock()
+_policy: dict = {}
+
+def _load_policy() -> dict:
+    """Load safety_policy.json, falling back to safe defaults on any error."""
+    try:
+        return json.loads(_POLICY_PATH.read_text())
+    except Exception as exc:
+        log.warning("[filter] Could not load safety_policy.json: %s — using defaults.", exc)
+        return {}
+
+def _reload_policy() -> None:
+    global _policy
+    with _policy_lock:
+        _policy = _load_policy()
+
+_reload_policy()
+
+def _pol(path: str, default):
+    """Read a nested policy value by dot-separated path, e.g. 'prompt_filter.ml_threshold'."""
+    keys = path.split(".")
+    node = _policy
+    for k in keys:
+        if not isinstance(node, dict):
+            return default
+        node = node.get(k, default)
+    return node
+
 
 # ── Severity ──────────────────────────────────────────────────────────────────
 
@@ -66,10 +99,25 @@ _WARN_REASON    = "Flagged content: proceed with caution."
 class FilterResult:
     allowed:  bool
     severity: Severity
-    reason:   str   = ""
-    category: str   = ""
-    score:    float = 0.0
-    redacted: str   = ""
+    reason:   str        = ""
+    category: str        = ""
+    score:    float      = 0.0
+    redacted: str        = ""
+    trace:    list[dict] = field(default_factory=list)   # populated when debug_trace=true
+
+
+def _trace_enabled() -> bool:
+    return bool(_pol("debug_trace", False))
+
+
+# ── Normalisation cache ────────────────────────────────────────────────────────
+# Caches the last 512 normalised prompts to avoid re-normalising identical
+# inputs on repeated calls within the same session.
+
+@lru_cache(maxsize=512)
+def _normalise_cached(text: str) -> str:
+    """LRU-cached wrapper — call this instead of _normalise() in hot paths."""
+    return _normalise(text)
 
 
 # ── Runtime settings ──────────────────────────────────────────────────────────
@@ -430,81 +478,107 @@ def _ml_score(text: str) -> float:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class PromptFilter:
-    ML_THRESHOLD   = 0.80
-    RISK_THRESHOLD = RISK_THRESHOLD
+
+    @property
+    def ML_THRESHOLD(self) -> float:
+        return float(_pol("prompt_filter.ml_threshold", 0.80))
+
+    @property
+    def RISK_THRESHOLD(self) -> int:
+        return int(_pol("prompt_filter.risk_threshold", RISK_THRESHOLD))
 
     def check(self, prompt: str, user_id: str = "anonymous") -> FilterResult:
-        n = _normalise(prompt)
+        n = _normalise_cached(prompt)
+        tr: list[dict] = []
+        debug = _trace_enabled()
+
+        def _step(layer: str, **kw) -> None:
+            if debug:
+                tr.append({"layer": layer, **kw})
+
+        _step("normalise", status="ok", length=len(n))
 
         # [A] Hard block patterns (pre-compiled)
         for rx, category, severity in _BLOCK_COMPILED:
             if rx.search(n):
+                _step("hard_block", category=category, severity=severity.value, triggered=True)
                 _audit(user_id, "block", category, prompt[:200])
                 if severity == Severity.CRITICAL:
                     _write_critical_alert(category, user_id, prompt[:500])
                 return FilterResult(
                     allowed=False, severity=severity,
-                    reason=_BLOCKED_REASON, category=category,
+                    reason=_BLOCKED_REASON, category=category, trace=tr,
                 )
+        _step("hard_block", triggered=False)
 
         # [B] 18+ adult filter — always enabled, cannot be disabled (pre-compiled)
         for rx, category in _ADULT_COMPILED:
             if rx.search(n):
+                _step("adult_filter", category=category, triggered=True)
                 _audit(user_id, "block", category, prompt[:200])
                 return FilterResult(
                     allowed=False, severity=Severity.BLOCK,
-                    reason=_BLOCKED_REASON, category=category,
+                    reason=_BLOCKED_REASON, category=category, trace=tr,
                 )
+        _step("adult_filter", triggered=False)
 
         # [C] Intent patterns (pre-compiled)
         for rx, category in _INTENT_COMPILED:
             if rx.search(n):
+                _step("intent", category=category, triggered=True)
                 _audit(user_id, "block", category, prompt[:200])
                 return FilterResult(
                     allowed=False, severity=Severity.BLOCK,
-                    reason=_BLOCKED_REASON, category=category,
+                    reason=_BLOCKED_REASON, category=category, trace=tr,
                 )
+        _step("intent", triggered=False)
 
         # [D] Fuzzy keyword detection
         for word, threshold in FUZZY_KEYWORDS:
             if _fuzzy_contains(n, word, threshold):
+                _step("fuzzy", word=word, triggered=True)
                 _audit(user_id, "block", f"fuzzy:{word}", prompt[:200])
                 return FilterResult(
                     allowed=False, severity=Severity.BLOCK,
-                    reason=_BLOCKED_REASON, category=f"fuzzy:{word}",
+                    reason=_BLOCKED_REASON, category=f"fuzzy:{word}", trace=tr,
                 )
+        _step("fuzzy", triggered=False)
 
         # [E] Risk score (pre-compiled)
         score = sum(pts for rx, pts in _RISK_COMPILED if rx.search(n))
+        _step("risk_score", score=score, threshold=self.RISK_THRESHOLD)
         if score >= self.RISK_THRESHOLD:
             _audit(user_id, "block", f"risk-score:{score}", prompt[:200])
             return FilterResult(
                 allowed=False, severity=Severity.BLOCK,
                 reason=_BLOCKED_REASON, category="risk-score",
-                score=float(score),
+                score=float(score), trace=tr,
             )
 
         # [F] ML injection classifier
         ml = _ml_score(n)
+        _step("ml_classifier", score=round(ml, 4), threshold=self.ML_THRESHOLD)
         if ml >= self.ML_THRESHOLD:
             _audit(user_id, "block", "prompt-injection-ml", prompt[:200])
             return FilterResult(
                 allowed=False, severity=Severity.BLOCK,
                 reason=_BLOCKED_REASON, category="prompt-injection",
-                score=ml,
+                score=ml, trace=tr,
             )
 
         # [G] Warn patterns (pre-compiled)
         for rx, category in _WARN_COMPILED:
             if rx.search(n):
+                _step("warn", category=category, triggered=True)
                 _audit(user_id, "warn", category, prompt[:200])
                 return FilterResult(
                     allowed=True, severity=Severity.WARN,
                     reason=_WARN_REASON, category=category,
-                    redacted=rx.sub("[REDACTED]", prompt),
+                    redacted=rx.sub("[REDACTED]", prompt), trace=tr,
                 )
 
-        return FilterResult(allowed=True, severity=Severity.SAFE)
+        _step("result", decision="allow")
+        return FilterResult(allowed=True, severity=Severity.SAFE, trace=tr)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -540,14 +614,24 @@ def _load_nsfw_clf():
 
 
 class ImageFilter:
-    NSFW_THRESHOLD = 0.65
     # Known NSFW label names across common Hugging Face classifiers.
-    # Explicit set avoids fragile substring matching and handles models
-    # that use numeric labels ("LABEL_1") or alternate spellings.
     NSFW_LABELS = frozenset({
         "nsfw", "explicit", "porn", "pornographic", "hentai",
         "sexy", "label_1", "1", "unsafe",
     })
+    # Known "safe" / minor-category labels from age-estimation classifiers
+    MINOR_LABELS = frozenset({
+        "child", "minor", "kid", "infant", "baby", "toddler",
+        "young", "underage", "juvenile",
+    })
+
+    @property
+    def NSFW_BLOCK_THRESHOLD(self) -> float:
+        return float(_pol("image_filter.nsfw_block_threshold", 0.65))
+
+    @property
+    def NSFW_WARN_THRESHOLD(self) -> float:
+        return float(_pol("image_filter.nsfw_warn_threshold", 0.35))
 
     def check(self, image_path: str, user_id: str = "anonymous") -> FilterResult:
         if not get_setting("nsfw_image_filter_enabled"):
@@ -564,19 +648,44 @@ class ImageFilter:
         try:
             img        = _PILImage.open(image_path).convert("RGB")
             results    = clf(img)
+
             nsfw_score = max(
                 (r["score"] for r in results
                  if r["label"].lower() in self.NSFW_LABELS),
                 default=0.0,
             )
-            if nsfw_score >= self.NSFW_THRESHOLD:
+
+            # Age-safety check on generated output images.
+            # If any "minor-category" label fires with high confidence AND
+            # the image also has a non-trivial NSFW score, block immediately.
+            age_check_enabled = bool(_pol("image_filter.age_check_enabled", True))
+            if age_check_enabled:
+                minor_score = max(
+                    (r["score"] for r in results
+                     if any(lbl in r["label"].lower() for lbl in self.MINOR_LABELS)),
+                    default=0.0,
+                )
+                if minor_score >= float(_pol("image_filter.age_check_min_age_score", 0.70)):
+                    log.warning(
+                        "[filter] Possible minor detected in output (%.2f) user=%s",
+                        minor_score, user_id,
+                    )
+                    _audit(user_id, "block", "age-safety", image_path)
+                    _write_critical_alert("age-safety-image", user_id, image_path)
+                    return FilterResult(
+                        allowed=False, severity=Severity.CRITICAL,
+                        reason=_BLOCKED_REASON, category="age-safety",
+                        score=minor_score,
+                    )
+
+            if nsfw_score >= self.NSFW_BLOCK_THRESHOLD:
                 log.warning("[filter] NSFW image blocked (%.2f) user=%s", nsfw_score, user_id)
                 _audit(user_id, "block", "nsfw-image", image_path)
                 return FilterResult(
                     allowed=False, severity=Severity.BLOCK,
                     reason=_BLOCKED_REASON, category="nsfw-image", score=nsfw_score,
                 )
-            if nsfw_score >= 0.35:
+            if nsfw_score >= self.NSFW_WARN_THRESHOLD:
                 return FilterResult(
                     allowed=True, severity=Severity.WARN,
                     reason="Image may contain sensitive content.", category="nsfw-image",
@@ -586,6 +695,15 @@ class ImageFilter:
             log.error("[filter] Image check error: %s", exc)
 
         return FilterResult(allowed=True, severity=Severity.SAFE)
+
+
+def check_input_image(image_path: str, user_id: str = "anonymous") -> FilterResult:
+    """
+    Check a USER-UPLOADED input image before it enters the generation pipeline.
+    Blocks if any person in the image appears to be under 18.
+    Uses the same NSFW classifier — minor-category labels are checked.
+    """
+    return _image_filter.check(image_path, user_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -647,7 +765,10 @@ def _audit(user_id: str, action: str, category: str, content: str) -> None:
 
 _prompt_filter = PromptFilter()
 _image_filter  = ImageFilter()
-_rate_limiter  = RateLimiter(max_requests=30, window_seconds=60)
+_rate_limiter  = RateLimiter(
+    max_requests=int(_pol("rate_limit.max_requests_per_window", 30)),
+    window_seconds=int(_pol("rate_limit.window_seconds", 60)),
+)
 
 
 def check_prompt(prompt: str, user_id: str = "anonymous") -> FilterResult:

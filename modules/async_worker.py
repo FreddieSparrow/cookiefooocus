@@ -1,3 +1,6 @@
+# Cookie-Fooocus Async Worker
+# Provided by CookieHostUK — coded with Claude AI assistance.
+# This module is part of the Cookie-Fooocus safety-hardened fork of Fooocus.
 import threading
 
 from extras.inpaint_mask import generate_mask_from_image, SAMOptions
@@ -194,7 +197,7 @@ def worker():
     from modules.sdxl_styles import apply_style, get_random_style, fooocus_expansion, apply_arrays, random_style_name
     from modules.private_logger import log
     from extras.expansion import safe_str
-    from modules.content_filter import check_prompt, check_image, preload_models as _preload_filter
+    from modules.content_filter import check_prompt, check_image, check_input_image, preload_models as _preload_filter
 
     # Warm up ML classifiers in the background so the first request isn't slow
     import threading as _threading
@@ -1168,6 +1171,33 @@ def worker():
         current_progress = 1
 
         if async_task.input_image_checkbox:
+            # ── Input image age/NSFW check (always runs, cannot be bypassed) ─────
+            user_id = getattr(async_task, 'user_id', 'anonymous')
+            _input_images_to_check = []
+            if async_task.uov_input_image is not None:
+                _input_images_to_check.append(async_task.uov_input_image)
+            if async_task.inpaint_input_image is not None:
+                _input_images_to_check.append(async_task.inpaint_input_image)
+            for _img_arr in _input_images_to_check:
+                # Save to a temp file so the image classifier can read it
+                try:
+                    import tempfile, cv2 as _cv2
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as _tf:
+                        _tmp_path = _tf.name
+                    _cv2.imwrite(_tmp_path, _cv2.cvtColor(_img_arr, _cv2.COLOR_RGB2BGR))
+                    _input_result = check_input_image(_tmp_path, user_id)
+                    try:
+                        import os as _os2; _os2.remove(_tmp_path)
+                    except Exception:
+                        pass
+                    if not _input_result.allowed:
+                        print(f'[Content Filter] Input image blocked: {_input_result.reason}')
+                        async_task.last_stop = 'skip'
+                        stop_processing(async_task, preparation_start_time)
+                        return
+                except Exception as _img_check_exc:
+                    print(f'[Content Filter] Input image check error: {_img_check_exc}')
+            # ─────────────────────────────────────────────────────────────────────
             base_model_additional_loras, clip_vision_path, controlnet_canny_path, controlnet_cpds_path, inpaint_head_model_path, inpaint_image, inpaint_mask, ip_adapter_face_path, ip_adapter_path, ip_negative_path, skip_prompt_processing, use_synthetic_refiner = apply_image_input(
                 async_task, base_model_additional_loras, clip_vision_path, controlnet_canny_path, controlnet_cpds_path,
                 goals, inpaint_head_model_path, inpaint_image, inpaint_mask, inpaint_parameterized, ip_adapter_face_path,

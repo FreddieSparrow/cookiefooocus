@@ -1,0 +1,25 @@
+{
+  "_comment": "Cookie-Fooocus safety policy — edit thresholds here, no code changes needed.",
+  "_version": "1.0.0",
+
+  "rate_limit": {
+    "max_requests_per_window": 30,
+    "window_seconds": 60
+  },
+
+  "prompt_filter": {
+    "enabled": true,
+    "ml_threshold": 0.80,
+    "risk_threshold": 6
+  },
+
+  "image_filter": {
+    "enabled": true,
+    "nsfw_block_threshold": 0.65,
+    "nsfw_warn_threshold": 0.35,
+    "age_check_enabled": true,
+    "age_check_min_age_score": 0.70
+  },
+
+  "debug_trace": false
+}

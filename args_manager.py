@@ -2,6 +2,22 @@ import ldm_patched.modules.args_parser as args_parser
 
 args_parser.parser.add_argument("--share", action='store_true', help="Set whether to share on Gradio.")
 
+# ── Mode selection ─────────────────────────────────────────────────────────────
+# --server  : enables multi-user authentication, rate-limiting, and audit logs.
+#             Requires auth.json to be configured with user credentials.
+#             Without this flag the app runs as a single-user local tool
+#             identical to upstream Fooocus — no login system at all.
+args_parser.parser.add_argument(
+    "--server",
+    action="store_true",
+    default=False,
+    help=(
+        "Run in server mode: enables authentication, per-user rate limiting, "
+        "and full audit logging. Requires auth.json. "
+        "Without this flag the app runs as a plain local Fooocus instance."
+    ),
+)
+
 args_parser.parser.add_argument("--preset", type=str, default=None, help="Apply specified UI preset.")
 args_parser.parser.add_argument("--disable-preset-selection", action='store_true',
                                 help="Disables preset selection in Gradio.")

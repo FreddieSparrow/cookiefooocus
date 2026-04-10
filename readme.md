@@ -1,6 +1,20 @@
-# Cookie-Fooocus
+# 🍪 Cookie-Fooocus
 
-A security-hardened, safety-filtered fork of [Fooocus](https://github.com/lllyasviel/Fooocus) with Ollama-powered prompt expansion, multi-layer content moderation, and flexible hardware support — from high-end GPUs to CPU-only servers.
+**Provided by CookieHostUK · Coded with Claude AI assistance**
+
+A security-hardened, safety-filtered fork of [Fooocus](https://github.com/lllyasviel/Fooocus) with multi-layer content moderation, hardware-adaptive prompt expansion, dual local/server modes, and full Apple Silicon support.
+
+---
+
+## ⚖️ Legal Disclaimer
+
+> **No Warranty.** This software is provided "as is" without warranty of any kind. The authors and CookieHostUK accept no liability for any claim, damages, or other liability arising from use of this software or its generated content.
+>
+> **User Responsibility.** You are solely responsible for all content generated. Ensure your use complies with all applicable local, national, and international laws, including copyright, privacy, and content regulations.
+>
+> **Age Policy.** This tool must not be used to generate, process, or distribute content depicting minors in any sexual or harmful context. Automated safety systems enforce this — you remain legally responsible.
+>
+> **No Liability for AI Output.** Generated images are produced by AI models. No representations are made about accuracy, appropriateness, or fitness for any purpose.
 
 ---
 
@@ -8,14 +22,40 @@ A security-hardened, safety-filtered fork of [Fooocus](https://github.com/lllyas
 
 | Feature | Upstream Fooocus | Cookie-Fooocus |
 |---------|-----------------|----------------|
-| Prompt expansion | Offline GPT-2 (local model file) | **Ollama / Gemma 4** (local LLM server) |
+| Prompt expansion | Offline GPT-2 | **Hardware-adaptive: Ollama/Gemma 4 on capable hardware, GPT-2 fallback otherwise** |
 | Content moderation | None | **Multi-layer filter** (normalisation + rules + ML) |
-| NSFW image filter | Basic censor | **HuggingFace classifier** with score thresholds |
-| Authentication | Plaintext passwords | **PBKDF2-HMAC-SHA256**, 600k iterations |
+| NSFW image filter | Basic censor | **HuggingFace classifier** with configurable score thresholds |
+| Age safety check | None | **Input and output image age-check** — blocks suspected minors |
+| Authentication | Plaintext passwords | **PBKDF2-HMAC-SHA256** 600k iterations (server mode only) |
+| Mode of operation | Single mode | **Local mode** (no auth, identical to upstream) + **Server mode** (multi-user auth) |
 | Model file safety | Raw `torch.load()` | **Pickle allowlist** (prevents RCE from `.ckpt` files) |
-| Hardware modes | Manual CLI flags | **Interactive first-run wizard** (5 modes) |
-| Safety enforcement | None | **content_filter.py verified against repo on every boot** |
-| Docker support | Yes | Removed (not needed for local/server installs) |
+| Hardware modes | Manual CLI flags | **Interactive first-run wizard** (6 modes incl. Apple Silicon) |
+| Apple Silicon | Partial | **Mode 6: MPS via Metal, optimised for 32 GB+ unified memory** |
+| Safety enforcement | None | **content_filter.py verified on every boot** |
+| Policy config | Hardcoded | **`safety_policy.json`** — tune thresholds without code changes |
+| Debug trace | None | **Optional `debug_trace` mode** shows full decision chain |
+
+---
+
+## Architecture
+
+```
+Cookie-Fooocus
+├── core/                   Fooocus engine (untouched)
+├── extras/
+│   └── expansion.py        Hardware-gated Ollama/GPT-2 expansion
+├── modules/
+│   ├── content_filter.py   Multi-layer safety pipeline (always active)
+│   ├── hardware_check.py   Detects Apple Silicon / PC spec for Ollama gate
+│   ├── auth.py             PBKDF2 authentication (server mode only)
+│   └── first_run.py        Setup wizard (memory mode selection)
+├── safety_policy.json      Externalised safety thresholds (edit freely)
+└── webui.py                Gradio UI with branding, tips, legal footer
+```
+
+**Mode separation:**
+- **Local mode** (default) — no auth module loaded, identical to upstream Fooocus
+- **Server mode** (`--server`) — PBKDF2 auth, rate limiting, full audit logs
 
 ---
 
@@ -25,30 +65,9 @@ A security-hardened, safety-filtered fork of [Fooocus](https://github.com/lllyas
 
 - Python 3.10+
 - Git
-- [Ollama](https://ollama.com) — for prompt expansion (required)
-- An NVIDIA/AMD GPU with 4 GB+ VRAM, **or** 16 GB+ system RAM for no-VRAM mode, **or** 64 GB+ RAM for CPU-only mode
+- An NVIDIA/AMD GPU with 4 GB+ VRAM, **or** an Apple Silicon Mac with 32 GB+ unified memory, **or** 16 GB+ system RAM for no-VRAM mode
 
-### 2. Install Ollama and pull Gemma 4
-
-```bash
-# Install Ollama (macOS / Linux)
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull Gemma 4
-ollama pull gemma4
-
-# Start the Ollama server (runs in background)
-ollama serve
-```
-
-On Windows, download the Ollama installer from [ollama.com](https://ollama.com) and run `ollama pull gemma4` in a terminal.
-
-Verify it works:
-```bash
-ollama run gemma4 "expand this image prompt: cat in a forest"
-```
-
-### 3. Clone and install Cookie-Fooocus
+### 2. Clone and install
 
 ```bash
 git clone https://github.com/FreddieSparrow/cookiefooocus.git
@@ -65,9 +84,31 @@ source fooocus_env/bin/activate   # Windows: fooocus_env\Scripts\activate
 pip install -r requirements_versions.txt
 ```
 
-Optional (enables faster fuzzy matching and ML classifiers in the content filter):
+Optional extras (enables faster fuzzy matching, ML classifiers, and NSFW image filter):
 ```bash
-pip install rapidfuzz transformers
+pip install rapidfuzz transformers pillow psutil
+```
+
+### 3. Ollama (optional — for Gemma 4 prompt expansion)
+
+Ollama is only used if your hardware meets minimum requirements:
+- **Apple Silicon Mac** — 32 GB+ unified memory
+- **PC** — 26 GB+ RAM and 12 GB+ VRAM
+
+If requirements are not met, Cookie-Fooocus automatically falls back to the original GPT-2 expansion engine.
+
+```bash
+# Install Ollama (macOS / Linux)
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull gemma4
+ollama serve
+```
+
+On Windows: download from [ollama.com](https://ollama.com) and run `ollama pull gemma4`.
+
+Override host or model:
+```bash
+OLLAMA_HOST=http://192.168.1.10:11434 OLLAMA_MODEL=gemma4 python entry_with_update.py
 ```
 
 ### 4. First launch
@@ -76,129 +117,166 @@ pip install rapidfuzz transformers
 python entry_with_update.py
 ```
 
-On first launch a setup wizard runs and asks two questions. Your answers are saved and never asked again.
-
-**Question 1 — Memory mode:**
-
-| # | Mode | Who it's for | RAM / VRAM needed |
-|---|------|-------------|------------------|
-| 1 | GPU (VRAM) | NVIDIA/AMD GPU | 4 GB+ VRAM |
-| 2 | Low VRAM | GPU with limited VRAM | < 4 GB VRAM |
-| 3 | CPU only | No GPU, high-core server | **64 GB+ RAM** |
-| 4 | Auto-detect | Let the app decide | — |
-| 5 | No VRAM / RAM | iGPU or no dedicated GPU | **16 GB+ DDR4/DDR5** |
-
-**Question 2 — Adult content filter:** Enable or disable the 18+ content gate.
-
-To re-run the wizard, delete `~/.config/cookiefooocus/first_run.json`.
-
-### 5. Custom Ollama host or model
-
-By default, Cookie-Fooocus connects to Ollama at `http://localhost:11434` using the `gemma4` model. Override with environment variables:
-
-```bash
-OLLAMA_HOST=http://192.168.1.10:11434 OLLAMA_MODEL=gemma4 python entry_with_update.py
-```
+A setup wizard runs once, asking you to choose a hardware mode. Your answer is saved and never asked again. To re-run, delete `~/.config/cookiefooocus/first_run.json`.
 
 ---
 
-## Features
+## Hardware Modes (First-Run Wizard)
 
-### Prompt expansion — Ollama / Gemma 4
+| # | Mode | Who it's for | Min requirement |
+|---|------|-------------|-----------------|
+| 1 | GPU (VRAM) | NVIDIA/AMD GPU | 4 GB+ VRAM |
+| 2 | Low VRAM | GPU < 4 GB VRAM | < 4 GB VRAM |
+| 3 | CPU only | No GPU, high-core server | **64 GB+ RAM** |
+| 4 | Auto-detect | Let the app decide | — |
+| 5 | No VRAM / RAM | iGPU or no GPU | **16 GB+ DDR4/DDR5** |
+| 6 | Apple Silicon | M-series Mac | **32 GB+ unified memory** |
 
-Replaces the original offline GPT-2 engine with a locally-served Gemma 4 model via Ollama. Every prompt is expanded into a richer, more detailed description before generation — improving output quality without requiring any cloud connection.
+**Mode 6 (Apple Silicon)** uses PyTorch MPS (Metal Performance Shaders). No additional drivers are needed — MPS is auto-detected by PyTorch. 32 GB unified memory is recommended for SDXL.
 
-- Seed-stable: the same seed produces the same expansion
-- Graceful fallback: if Ollama is unreachable, the original prompt passes through unchanged
-- Configurable: use any Ollama model via `OLLAMA_MODEL` env var
+---
 
-### Content safety filter
+## Local Mode vs Server Mode
 
-A multi-layer moderation middleware that sits between user input and the generation pipeline.
+### Local Mode (default)
 
-**Prompt normalisation** — defeats ~80% of real-world bypass tricks before any rule fires:
+```bash
+python entry_with_update.py
+```
 
-- Unicode NFKC (`𝓈𝑒𝓍` → `sex`, fullwidth, bold/italic variants)
-- Homoglyph substitution (Cyrillic/Greek lookalikes: `с` → `c`, `ο` → `o`)
-- Leet-speak (`3→e`, `0→o`, `4→a`, `@→a` and more)
-- Diacritics (`café` → `cafe`)
-- Zero-width character stripping
-- Spaced-word collapse (`s e x` → `sex`)
-- Base64 sniffing (entropy-gated to prevent CPU exhaustion attacks)
+- No login system
+- No passwords
+- Single-user, identical behaviour to upstream Fooocus
+- Auth module is **not loaded at all**
 
-**Detection layers:**
+### Server Mode
+
+```bash
+python entry_with_update.py --server --listen
+```
+
+- Full PBKDF2-HMAC-SHA256 authentication (600k iterations)
+- Multi-user support
+- Per-user rate limiting
+- Audit logging
+
+Create `auth.json` in the project root:
+```json
+[
+  {"user": "alice", "pass": "your-password-here"},
+  {"user": "bob",   "pass": "another-password"}
+]
+```
+Plaintext passwords are automatically hashed to PBKDF2 on first load. The original `pass` field is not stored.
+
+---
+
+## Content Safety System
+
+All of the following run on every generation — they cannot be disabled by users.
+
+### Prompt normalisation (defeats ~80% of real-world bypass tricks)
+
+| Step | What it handles |
+|------|----------------|
+| Unicode NFKC | Bold/italic math, fullwidth, `𝓈𝑒𝓍 → sex` |
+| Homoglyphs | Cyrillic/Greek lookalikes: `с → c`, `ο → o` |
+| Leet-speak | `3→e`, `0→o`, `4→a`, `@→a` |
+| Diacritics | `café → cafe` |
+| Zero-width chars | Strips invisible characters |
+| Spaced words | `s e x → sex` |
+| Base64 sniffing | Entropy-gated decode + scan |
+
+### Detection pipeline
 
 | Layer | What it catches |
 |-------|----------------|
-| Hard block (CRITICAL) | CSAM, WMD synthesis |
+| Hard block (CRITICAL) | CSAM, WMD synthesis — critical alert written to disk |
 | Hard block (BLOCK) | Deepfake nudity, weapons synthesis, prompt injection |
-| Adult filter | Toggleable 18+ content gate |
+| 18+ adult filter | **Permanently enabled** — cannot be toggled by users |
 | Intent patterns | Indirect phrasing (`"remove her clothes"`, `"undress the subject"`) |
 | Fuzzy keywords | Edit-distance matching (catches intentional misspellings) |
-| Risk scoring | Additive keyword clusters — blocks at threshold |
+| Risk scoring | Additive keyword clusters — blocks at configurable threshold |
 | ML classifier | Optional DeBERTa-based prompt-injection detector |
 | Warn-pass | Gore/drug references flagged but not blocked |
 
-**NSFW image filter** — every generated image is checked with `Falconsai/nsfw_image_detection` before display. Blocks at 65% confidence, warns at 35%.
+### Image safety
 
-**Wired into the generation pipeline** — the filter runs at two mandatory checkpoints that cannot be bypassed:
-1. **Before generation** — `check_prompt()` is called at the start of every `process_prompt()` call. If the prompt is blocked, generation is cancelled and a generic error is returned to the user.
-2. **After generation** — `check_image()` is called on every saved image path. Blocked images are deleted from disk before the result is returned to the UI.
+- **Output images** — every generated image is checked with `Falconsai/nsfw_image_detection` before display
+- **Input images** — uploaded images are checked before entering the pipeline
+- **Age-safety check** — if an image contains a suspected minor, it is blocked and a critical alert is written
 
-The filter cannot be disabled by users. The only toggle exposed to users is the 18+ adult content gate asked during first-run setup — hard blocks (CSAM, WMD, prompt injection) always run regardless.
+Thresholds are configurable in `safety_policy.json`.
 
-**Audit log** — SHA-256-hashed JSONL at `~/.local/share/cookiefooocus/ai-audit.jsonl`. No raw prompts ever written. Thread-safe under parallel generation.
+### Policy configuration
 
-**Critical alerts** — CSAM and WMD matches write a separate JSON alert to `~/.local/share/cookiefooocus/alerts/`.
+Edit `safety_policy.json` to tune thresholds without touching any code:
 
-**Rate limiter** — 30 requests per 60 seconds per user, enforced before any filter work runs.
+```json
+{
+  "prompt_filter": {
+    "ml_threshold": 0.80,
+    "risk_threshold": 6
+  },
+  "image_filter": {
+    "nsfw_block_threshold": 0.65,
+    "nsfw_warn_threshold": 0.35,
+    "age_check_enabled": true
+  },
+  "debug_trace": false
+}
+```
 
-### content_filter.py integrity enforcement
+Set `"debug_trace": true` to see the full decision chain in `FilterResult.trace` (for development/debugging only — do not leave on in production).
 
-On every boot, `launch.py` compares the local `modules/content_filter.py` against the upstream repository. If the file is missing, modified, or out of date, **startup is blocked** with a clear error message. This prevents the safety layer from being silently disabled.
+### Audit log
 
-To restore after an accidental change:
+SHA-256-hashed JSONL at `~/.local/share/cookiefooocus/ai-audit.jsonl`. No raw prompts are ever written. Thread-safe under parallel generation.
+
+### Critical alerts
+
+CSAM, WMD, and age-safety matches write a separate JSON alert to `~/.local/share/cookiefooocus/alerts/`.
+
+### Rate limiter
+
+30 requests per 60 seconds per user by default (configurable in `safety_policy.json`).
+
+### content_filter.py integrity
+
+On every boot, `launch.py` compares the local `modules/content_filter.py` against the upstream repository. If the file is missing, modified, or out of date, startup is blocked.
+
+To restore:
 ```bash
 git checkout modules/content_filter.py
 ```
 
-### Hardened authentication
+---
 
-Upstream Fooocus compares passwords as plaintext strings. This fork replaces that with:
+## Hardened Authentication (Server Mode)
 
-- **PBKDF2-HMAC-SHA256** with 600,000 iterations (OWASP 2023 recommended)
-- **`hmac.compare_digest`** for constant-time comparison (prevents timing attacks)
-- 32-byte random salt per password
-- Backwards compatible with legacy SHA-256 hashes
-
-Plaintext passwords in `auth.json` are automatically hashed on first load.
-
-### Safe model loading
-
-PyTorch `.ckpt`/`.pt` model files use Python pickle, which can execute arbitrary code on load. This fork replaces the default unpickler with an allowlist that only permits `torch`, `numpy`, and `collections` — blocking any model file that attempts to import or execute anything else.
-
-### Hardware modes (first-run wizard)
-
-Five memory modes selectable at first launch:
-
-| Mode | Flags applied | Min requirement |
-|------|--------------|----------------|
-| 1 — GPU | _(none)_ | 4 GB VRAM |
-| 2 — Low VRAM | `--always-low-vram` | < 4 GB VRAM |
-| 3 — CPU only | `--always-cpu` | **64 GB RAM** |
-| 4 — Auto-detect | _(none)_ | Auto |
-| 5 — No VRAM / RAM | `--always-no-vram --unet-in-fp8-e4m3fn --vae-in-cpu` | **16 GB RAM** |
-
-**Mode 5 (No VRAM)** is designed for machines with no dedicated GPU VRAM — including iGPUs, integrated graphics, and servers. UNet is quantised to FP8 (~50% memory reduction), models live in system RAM, and the VAE runs on CPU to avoid any VRAM spike. SDXL fits in ~5.3 GB with these settings.
-
-**Mode 3 (CPU only)** targets high-core-count servers with no GPU. Expect very slow generation (10–20+ minutes per image). 64 GB RAM is required to hold models plus generation buffers.
+| Property | Detail |
+|----------|--------|
+| Algorithm | PBKDF2-HMAC-SHA256 |
+| Iterations | 600,000 (OWASP 2023 recommendation) |
+| Salt | 32-byte random per user |
+| Comparison | `hmac.compare_digest` (constant-time, prevents timing attacks) |
+| Migration | Plaintext passwords in `auth.json` auto-hashed on first load |
+| Auth module loading | **Only loaded in `--server` mode** — not imported in local mode |
 
 ---
 
-## All command-line flags
+## Safe Model Loading
+
+PyTorch `.ckpt`/`.pt` model files use Python pickle, which can execute arbitrary code. This fork replaces the default unpickler with an allowlist that only permits `torch`, `numpy`, and `collections`.
+
+---
+
+## All Command-Line Flags
 
 ```
-entry_with_update.py  [-h] [--listen [IP]] [--port PORT]
+entry_with_update.py  [--server]
+                      [--listen [IP]] [--port PORT]
+                      [--share]
                       [--disable-header-check [ORIGIN]]
                       [--web-upload-size WEB_UPLOAD_SIZE]
                       [--hf-mirror HF_MIRROR]
@@ -220,7 +298,7 @@ entry_with_update.py  [-h] [--listen [IP]] [--port PORT]
                       [--attention-split | --attention-quad | --attention-pytorch]
                       [--disable-xformers]
                       [--always-gpu | --always-high-vram | --always-normal-vram | --always-low-vram | --always-no-vram | --always-cpu [CPU_NUM_THREADS]]
-                      [--always-offload-from-vram]
+                      [--always-offload-from-vram] [--disable-offload-from-vram]
                       [--pytorch-deterministic] [--disable-server-log]
                       [--debug-mode] [--is-windows-embedded-python]
                       [--disable-server-info] [--multi-user] [--share]
@@ -237,7 +315,20 @@ entry_with_update.py  [-h] [--listen [IP]] [--port PORT]
 
 ---
 
-## Original Fooocus features (all preserved)
+## Minimum Hardware
+
+| Setup | GPU | VRAM | System RAM |
+|-------|-----|------|-----------|
+| Mode 1 — GPU | NVIDIA/AMD | 4 GB+ | 8 GB |
+| Mode 2 — Low VRAM | NVIDIA/AMD | < 4 GB | 8 GB |
+| Mode 3 — CPU only | None | — | **64 GB** |
+| Mode 4 — Auto | NVIDIA/AMD | Auto | 8 GB |
+| Mode 5 — No VRAM | iGPU / none | 0 GB | **16 GB** |
+| Mode 6 — Apple Silicon | Apple M-series | — (unified) | **32 GB** |
+
+---
+
+## Original Fooocus Features (all preserved)
 
 - Text-to-image with SDXL — no prompt engineering needed
 - Inpaint / Outpaint (Up / Down / Left / Right) with Fooocus's own inpaint model
@@ -255,18 +346,9 @@ entry_with_update.py  [-h] [--listen [IP]] [--port PORT]
 
 ---
 
-## Minimum hardware
+## Credits & Attribution
 
-| Setup | GPU | VRAM | System RAM |
-|-------|-----|------|-----------|
-| Mode 1 — GPU | NVIDIA/AMD | 4 GB+ | 8 GB |
-| Mode 2 — Low VRAM | NVIDIA/AMD | < 4 GB | 8 GB |
-| Mode 3 — CPU only | None | — | **64 GB** |
-| Mode 4 — Auto | NVIDIA/AMD | Auto | 8 GB |
-| Mode 5 — No VRAM | iGPU / none | 0 GB | **16 GB** |
-
----
-
-## License
-
-GPL-3.0 — same as upstream Fooocus.
+- **Provided by** [CookieHostUK](https://github.com/FreddieSparrow)
+- **Coded with** Claude AI assistance (Anthropic)
+- **Based on** [Fooocus](https://github.com/lllyasviel/Fooocus) by lllyasviel
+- **License:** GPL-3.0 — same as upstream Fooocus
