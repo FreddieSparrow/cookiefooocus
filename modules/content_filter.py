@@ -448,6 +448,16 @@ def preload_models() -> None:
     threading.Thread(target=_load_nsfw_clf, daemon=True).start()
 
 
+_ML_MODEL_STACK = [
+    # Primary — best accuracy
+    "protectai/deberta-v3-base-prompt-injection-v2",
+    # Secondary fallback
+    "laiyer/deberta-v3-base-prompt-injection",
+    # Tertiary fallback — lighter weight
+    "martin-ha/toxic-comment-model",
+]
+
+
 def _load_ml_classifier():
     global _ml_clf, _ml_clf_ready
     with _ml_clf_lock:
@@ -455,20 +465,19 @@ def _load_ml_classifier():
             return _ml_clf
         try:
             from transformers import pipeline as hf_pipeline
-            try:
-                _ml_clf = hf_pipeline(
-                    "text-classification",
-                    model="protectai/deberta-v3-base-prompt-injection-v2",
-                    device=-1, truncation=True, max_length=512,
-                )
-            except Exception:
-                _ml_clf = hf_pipeline(
-                    "text-classification",
-                    model="laiyer/deberta-v3-base-prompt-injection",
-                    device=-1, truncation=True, max_length=512,
-                )
+            for model_id in _ML_MODEL_STACK:
+                try:
+                    _ml_clf = hf_pipeline(
+                        "text-classification",
+                        model=model_id,
+                        device=-1, truncation=True, max_length=512,
+                    )
+                    log.info("[filter] ML classifier loaded: %s", model_id)
+                    break
+                except Exception as exc:
+                    log.debug("[filter] ML model %s unavailable: %s — trying next.", model_id, exc)
         except ImportError:
-            pass
+            log.info("[filter] transformers not installed — ML classifier disabled.")
         except Exception as exc:
             log.warning("[filter] ML classifier unavailable: %s", exc)
         _ml_clf_ready = True
@@ -482,9 +491,9 @@ def _ml_score(text: str) -> float:
     try:
         r = clf(text[:512])[0]
         label, score = r["label"].lower(), r["score"]
-        if "injection" in label or label in ("1", "label_1"):
+        if "injection" in label or label in ("1", "label_1", "toxic"):
             return score
-        if "legitimate" in label or label in ("0", "label_0"):
+        if "legitimate" in label or label in ("0", "label_0", "non_toxic", "not_toxic"):
             return 1.0 - score
         return score
     except Exception:

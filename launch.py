@@ -129,6 +129,24 @@ from modules.first_run import load_or_run_wizard, apply_memory_config
 # ── First-run wizard (memory mode) ───────────────────────────────────────────
 _first_run_config = load_or_run_wizard()
 apply_memory_config(_first_run_config)
+
+# ── Auto-updater (background, non-blocking) ───────────────────────────────────
+# Checks GitHub for a newer release and applies it via git pull.
+# Set "update_channel" in safety_policy.json to "stable" (default), "beta", or "dev".
+# The app continues loading while the check runs in the background.
+# To disable: set "update_channel": "off" in safety_policy.json
+try:
+    _update_channel = json.loads(
+        open(os.path.join(root, "safety_policy.json")).read()
+    ).get("update_channel", "stable")
+    if _update_channel != "off":
+        from modules.auto_updater import start_background_check
+        start_background_check(restart_on_update=False)
+        print(f"[Cookie-Fooocus] Auto-updater started (channel: {_update_channel}).")
+    else:
+        print("[Cookie-Fooocus] Auto-updater disabled (update_channel=off).")
+except Exception as _ue:
+    print(f"[Cookie-Fooocus] Auto-updater unavailable: {_ue}")
 # ─────────────────────────────────────────────────────────────────────────────
 
 REINSTALL_ALL = False

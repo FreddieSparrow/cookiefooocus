@@ -158,3 +158,88 @@ def list_users() -> list[dict]:
         {"user": u, "role": v["role"]}
         for u, v in auth_dict.items()
     ]
+
+
+def change_password(user: str, current_password: str, new_password: str) -> tuple[bool, str]:
+    """
+    Allow a user to change their own password.
+
+    - User must supply their CURRENT password to authenticate the change.
+    - Usernames cannot be changed here (set by admin in auth.json).
+    - Returns (success: bool, message: str).
+
+    Password requirements:
+      - Minimum 12 characters
+      - Cannot be the same as the current password
+      - Cannot be the default 'changeme123'
+    """
+    if not auth_dict or user not in auth_dict:
+        return False, "User not found."
+
+    if not _verify_password(current_password, auth_dict[user]["hash"]):
+        return False, "Current password is incorrect."
+
+    if len(new_password) < 12:
+        return False, "New password must be at least 12 characters."
+
+    if new_password == current_password:
+        return False, "New password must be different from current password."
+
+    if new_password in ("changeme123", "password", "admin123", "12345678901234"):
+        return False, "That password is not allowed. Please choose a stronger password."
+
+    auth_dict[user]["hash"] = _hash_password(new_password)
+    log.info("[auth] Password changed for user '%s'.", user)
+    return True, "Password changed successfully."
+
+
+def admin_add_user(
+    admin_user: str,
+    new_username: str,
+    initial_password: str,
+    role: str = "user",
+) -> tuple[bool, str]:
+    """
+    Admin-only: add a new user. Usernames are always set by an admin.
+
+    - admin_user must have role="admin"
+    - new_username must be unique
+    - initial_password must be ≥ 12 chars (user should change on first login)
+    """
+    if not is_admin(admin_user):
+        return False, "Permission denied — admin role required."
+
+    if new_username in auth_dict:
+        return False, f"User '{new_username}' already exists."
+
+    if not new_username or not new_username.replace("_", "").replace("-", "").isalnum():
+        return False, "Username must be alphanumeric (underscores/hyphens allowed)."
+
+    if len(initial_password) < 12:
+        return False, "Initial password must be at least 12 characters."
+
+    if role not in _VALID_ROLES:
+        return False, f"Invalid role '{role}'. Must be one of: {_VALID_ROLES}"
+
+    auth_dict[new_username] = {
+        "hash": _hash_password(initial_password),
+        "role": role,
+    }
+    log.info("[auth] Admin '%s' added user '%s' with role '%s'.", admin_user, new_username, role)
+    return True, f"User '{new_username}' created with role '{role}'."
+
+
+def admin_remove_user(admin_user: str, target_user: str) -> tuple[bool, str]:
+    """Admin-only: remove a user. Admins cannot remove themselves."""
+    if not is_admin(admin_user):
+        return False, "Permission denied — admin role required."
+
+    if admin_user == target_user:
+        return False, "Cannot remove your own account."
+
+    if target_user not in auth_dict:
+        return False, f"User '{target_user}' not found."
+
+    del auth_dict[target_user]
+    log.info("[auth] Admin '%s' removed user '%s'.", admin_user, target_user)
+    return True, f"User '{target_user}' removed."
