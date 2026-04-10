@@ -194,6 +194,11 @@ def worker():
     from modules.sdxl_styles import apply_style, get_random_style, fooocus_expansion, apply_arrays, random_style_name
     from modules.private_logger import log
     from extras.expansion import safe_str
+    from modules.content_filter import check_prompt, check_image, preload_models as _preload_filter
+
+    # Warm up ML classifiers in the background so the first request isn't slow
+    import threading as _threading
+    _threading.Thread(target=_preload_filter, daemon=True).start()
     from modules.util import (remove_empty_str, HWC3, resize_image, get_image_shape_ceil, set_image_shape_ceil,
                               get_shape_ceil, resample_image, erode_or_dilate, parse_lora_references_from_prompt,
                               apply_wildcards)
@@ -319,6 +324,24 @@ def worker():
             imgs = default_censor(imgs)
         progressbar(async_task, current_progress, f'Saving image {current_task_id + 1}/{total_count} to system ...')
         img_paths = save_and_log(async_task, height, imgs, task, use_expansion, width, loras, persist_image)
+
+        # ── Output image safety check (always runs, cannot be bypassed) ──────
+        user_id = getattr(async_task, 'user_id', 'anonymous')
+        safe_paths = []
+        for img_path in img_paths:
+            img_result = check_image(img_path, user_id)
+            if img_result.allowed:
+                safe_paths.append(img_path)
+            else:
+                import os as _os
+                try:
+                    _os.remove(img_path)
+                except Exception:
+                    pass
+                print(f'[Content Filter] Output image blocked: {img_result.reason}')
+        img_paths = safe_paths
+        # ─────────────────────────────────────────────────────────────────────
+
         yield_result(async_task, img_paths, current_progress, async_task.black_out_nsfw, False,
                      do_not_show_finished_images=not show_intermediate_results or async_task.disable_intermediate_results)
 
@@ -640,6 +663,14 @@ def worker():
 
     def process_prompt(async_task, prompt, negative_prompt, base_model_additional_loras, image_number, disable_seed_increment, use_expansion, use_style,
                        use_synthetic_refiner, current_progress, advance_progress=False):
+        # ── Content safety check (always runs, cannot be bypassed) ───────────
+        user_id = getattr(async_task, 'user_id', 'anonymous')
+        filter_result = check_prompt(prompt, user_id)
+        if not filter_result.allowed:
+            async_task.last_stop = 'skip'
+            raise ValueError(f"[Content Filter] {filter_result.reason}")
+        # ─────────────────────────────────────────────────────────────────────
+
         prompts = remove_empty_str([safe_str(p) for p in prompt.splitlines()], default='')
         negative_prompts = remove_empty_str([safe_str(p) for p in negative_prompt.splitlines()], default='')
         prompt = prompts[0]

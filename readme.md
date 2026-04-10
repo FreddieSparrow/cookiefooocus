@@ -141,6 +141,12 @@ A multi-layer moderation middleware that sits between user input and the generat
 
 **NSFW image filter** — every generated image is checked with `Falconsai/nsfw_image_detection` before display. Blocks at 65% confidence, warns at 35%.
 
+**Wired into the generation pipeline** — the filter runs at two mandatory checkpoints that cannot be bypassed:
+1. **Before generation** — `check_prompt()` is called at the start of every `process_prompt()` call. If the prompt is blocked, generation is cancelled and a generic error is returned to the user.
+2. **After generation** — `check_image()` is called on every saved image path. Blocked images are deleted from disk before the result is returned to the UI.
+
+The filter cannot be disabled by users. The only toggle exposed to users is the 18+ adult content gate asked during first-run setup — hard blocks (CSAM, WMD, prompt injection) always run regardless.
+
 **Audit log** — SHA-256-hashed JSONL at `~/.local/share/cookiefooocus/ai-audit.jsonl`. No raw prompts ever written. Thread-safe under parallel generation.
 
 **Critical alerts** — CSAM and WMD matches write a separate JSON alert to `~/.local/share/cookiefooocus/alerts/`.
