@@ -194,10 +194,24 @@ def _normalise(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
 
     # 9. Base64 payload sniffing (decode + append so patterns catch encoded text)
-    for match in re.findall(r'[A-Za-z0-9+/]{20,}={0,2}', text)[:3]:
+    #    Guard: only decode if Shannon entropy is high enough to be real base64
+    #    (prevents CPU exhaustion and false-positives on normal prose fragments)
+    def _high_entropy(s: str, threshold: float = 4.5) -> bool:
+        from math import log2
+        if not s:
+            return False
+        freq = {}
+        for c in s:
+            freq[c] = freq.get(c, 0) + 1
+        n = len(s)
+        return -sum((f / n) * log2(f / n) for f in freq.values()) >= threshold
+
+    for match in re.findall(r'[A-Za-z0-9+/]{20,64}={0,2}', text)[:3]:
+        if not _high_entropy(match):
+            continue
         try:
             decoded = base64.b64decode(match + '==').decode('utf-8', errors='ignore')
-            if decoded.isprintable() and len(decoded) > 4:
+            if decoded.isprintable() and 4 < len(decoded) <= 200:
                 text += ' ' + decoded.lower()
         except Exception:
             pass
@@ -233,8 +247,9 @@ except ImportError:
 
 
 def _fuzzy_contains(text: str, word: str, threshold: int = 88) -> bool:
-    """Return True if any token in text is ≥ threshold% similar to word."""
-    return any(_fuzzy_ratio(token, word) >= threshold for token in text.split())
+    """Return True if any token in text is ≥ threshold% similar to word.
+    Tokens capped at 100 to keep cost bounded on long prompts."""
+    return any(_fuzzy_ratio(token, word) >= threshold for token in text.split()[:100])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -337,6 +352,20 @@ WARN_PATTERNS: list[tuple[str, str]] = [
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _ml_clf, _ml_clf_lock, _ml_clf_ready = None, threading.Lock(), False
+
+
+def preload_models() -> None:
+    """
+    Call this at application startup (in a background thread) to warm up
+    both the ML injection classifier and the NSFW image classifier so the
+    first generation request does not block.
+
+    Example (in launch / webui startup):
+        import threading, modules.content_filter as cf
+        threading.Thread(target=cf.preload_models, daemon=True).start()
+    """
+    threading.Thread(target=_load_ml_classifier, daemon=True).start()
+    threading.Thread(target=_load_nsfw_clf, daemon=True).start()
 
 
 def _load_ml_classifier():
@@ -515,12 +544,20 @@ class ImageFilter:
         if clf is None:
             return FilterResult(allowed=True, severity=Severity.WARN,
                                 reason="NSFW classifier unavailable")
+        # Known NSFW label names across common Hugging Face classifiers.
+        # Explicit set avoids fragile substring matching and handles models
+        # that use numeric labels ("LABEL_1") or alternate spellings.
+        _NSFW_LABELS = frozenset({
+            "nsfw", "explicit", "porn", "pornographic", "hentai",
+            "sexy", "label_1", "1", "unsafe",
+        })
+
         try:
             img        = _PILImage.open(image_path).convert("RGB")
             results    = clf(img)
             nsfw_score = max(
                 (r["score"] for r in results
-                 if any(k in r["label"].lower() for k in ("nsfw", "explicit", "porn"))),
+                 if r["label"].lower() in _NSFW_LABELS),
                 default=0.0,
             )
             if nsfw_score >= self.NSFW_THRESHOLD:
@@ -574,7 +611,8 @@ class RateLimiter:
 #  AUDIT LOG
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_AUDIT_LOG = Path.home() / ".local" / "share" / "cookiefooocus" / "ai-audit.jsonl"
+_AUDIT_LOG  = Path.home() / ".local" / "share" / "cookiefooocus" / "ai-audit.jsonl"
+_audit_lock = threading.Lock()
 
 
 def _audit(user_id: str, action: str, category: str, content: str) -> None:
@@ -587,8 +625,9 @@ def _audit(user_id: str, action: str, category: str, content: str) -> None:
             "category": category,
             "hash":     hashlib.sha256(content.encode()).hexdigest()[:16],
         }
-        with _AUDIT_LOG.open("a") as fh:
-            fh.write(json.dumps(entry) + "\n")
+        with _audit_lock:
+            with _AUDIT_LOG.open("a") as fh:
+                fh.write(json.dumps(entry) + "\n")
     except Exception as exc:
         log.debug("[filter] Audit write failed: %s", exc)
 
