@@ -99,7 +99,7 @@ from modules.launch_util import is_installed, run, python, run_pip, requirements
 from modules.model_loader import load_file_from_url
 from modules.first_run import load_or_run_wizard, apply_memory_config
 
-# ── First-run wizard (memory mode + adult filter) ─────────────────────────────
+# ── First-run wizard (memory mode) ───────────────────────────────────────────
 _first_run_config = load_or_run_wizard()
 apply_memory_config(_first_run_config)
 # ─────────────────────────────────────────────────────────────────────────────

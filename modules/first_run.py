@@ -13,6 +13,9 @@ The config file is validated on every load:
     (key derived from machine-id so it doesn't leave the device)
 
 If validation fails the wizard re-runs automatically.
+
+Note: the 18+ adult content filter is always enabled and is not a user-
+configurable option. It cannot be disabled from the wizard or CLI.
 """
 
 import hashlib
@@ -26,13 +29,14 @@ from pathlib import Path
 _CONFIG_PATH = Path.home() / ".config" / "cookiefooocus" / "first_run.json"
 
 # ── Allowed values (strict allowlist — anything else is tampered/corrupt) ─────
-_VALID_MODES   = {"1", "2", "3", "4", "5"}
+_VALID_MODES   = {"1", "2", "3", "4", "5", "6"}
 _VALID_ARGS    = {
     "1": [],
     "2": ["--always-low-vram"],
     "3": ["--always-cpu"],
     "4": [],
     "5": ["--always-no-vram", "--unet-in-fp8-e4m3fn", "--vae-in-cpu"],
+    "6": ["--disable-offload-from-vram"],
 }
 
 MEMORY_MODES = {
@@ -43,6 +47,10 @@ MEMORY_MODES = {
     "5": {
         "label": "No VRAM / 16 GB RAM minimum — iGPU, server, or no dedicated GPU (requires 16 GB+ DDR4/DDR5)",
         "args":  ["--always-no-vram", "--unet-in-fp8-e4m3fn", "--vae-in-cpu"],
+    },
+    "6": {
+        "label": "Apple Silicon (M-series) — MPS via unified memory, 32 GB+ recommended",
+        "args":  ["--disable-offload-from-vram"],
     },
 }
 
@@ -90,7 +98,7 @@ def _validate(config: dict) -> None:
     Raise ValueError if the config dict fails validation.
     Strict: unknown keys, wrong types, or out-of-allowlist values all fail.
     """
-    required = {"memory_mode", "extra_args", "adult_filter_enabled"}
+    required = {"memory_mode", "extra_args"}
     unknown  = set(config.keys()) - required - {"_sig"}
     if unknown:
         raise ValueError(f"Unknown config keys (possible tampering): {unknown}")
@@ -105,10 +113,6 @@ def _validate(config: dict) -> None:
         raise ValueError(
             f"extra_args {args!r} does not match expected {expected_args!r} for mode {mode!r}"
         )
-
-    adf = config.get("adult_filter_enabled")
-    if not isinstance(adf, bool):
-        raise ValueError(f"adult_filter_enabled must be a bool, got {type(adf).__name__!r}")
 
 
 def _safe_load() -> dict:
@@ -157,7 +161,7 @@ def _prompt_memory_mode() -> dict:
         print(f"  [{key}] {info['label']}")
     print()
     while True:
-        choice = input("Enter choice [1-5] (default 4 = auto): ").strip() or "4"
+        choice = input("Enter choice [1-6] (default 4 = auto): ").strip() or "4"
         if choice in MEMORY_MODES:
             info = MEMORY_MODES[choice]
             print(f"\n  Selected: {info['label']}")
@@ -168,31 +172,18 @@ def _prompt_memory_mode() -> dict:
             if choice == "5":
                 print("  NOTE: Mode 5 requires at least 16 GB of system RAM (DDR4 or DDR5).")
                 print("        Running with less will cause out-of-memory errors.")
+            if choice == "6":
+                print("  NOTE: Mode 6 uses Apple MPS (Metal Performance Shaders).")
+                print("        32 GB unified memory recommended for SDXL.")
+                print("        MPS is auto-detected — no additional drivers needed.")
             print()
             return {"memory_mode": choice, "extra_args": info["args"]}
-        print("  Please enter 1, 2, 3, 4, or 5.")
-
-
-def _prompt_adult_filter() -> bool:
-    print("18+ Content Filter:")
-    print("  [Y] ENABLED  — block adult content (recommended, default)")
-    print("  [N] DISABLED — no adult content restriction")
-    print()
-    while True:
-        ans = input("Enable 18+ filter? [Y/n]: ").strip().lower() or "y"
-        if ans in ("y", "yes"):
-            print("  18+ filter ENABLED\n")
-            return True
-        if ans in ("n", "no"):
-            print("  18+ filter DISABLED — you accept responsibility for all content.\n")
-            return False
-        print("  Please enter Y or N.")
+        print("  Please enter 1, 2, 3, 4, 5, or 6.")
 
 
 def run_wizard() -> dict:
     config = {}
     config.update(_prompt_memory_mode())
-    config["adult_filter_enabled"] = _prompt_adult_filter()
     _save(config)
     print(f"Configuration saved to: {_CONFIG_PATH}\n")
     return config
@@ -210,17 +201,16 @@ def load_or_run_wizard() -> dict:
             config = _safe_load()
             print(
                 f"[Cookie-Fooocus] Config loaded — "
-                f"mode={MEMORY_MODES[config['memory_mode']]['label'].split('—')[0].strip()}, "
-                f"adult_filter={'ON' if config['adult_filter_enabled'] else 'OFF'}"
+                f"mode={MEMORY_MODES[config['memory_mode']]['label'].split('—')[0].strip()}"
             )
             return config
         except Exception as exc:
             print(f"[Cookie-Fooocus] Config validation failed ({exc}). Re-running wizard.")
 
-    # Non-interactive (Docker / CI / piped stdin) — safe defaults, no wizard
+    # Non-interactive (CI / piped stdin) — safe defaults, no wizard
     if not sys.stdin.isatty():
         print("[Cookie-Fooocus] Non-interactive mode — using auto-detect + safe defaults.")
-        config = {"memory_mode": "4", "extra_args": [], "adult_filter_enabled": True}
+        config = {"memory_mode": "4", "extra_args": []}
         _save(config)
         return config
 
@@ -228,16 +218,7 @@ def load_or_run_wizard() -> dict:
 
 
 def apply_memory_config(config: dict) -> None:
-    """
-    Inject extra CLI flags from the config into sys.argv (before argparse runs)
-    and apply the adult-filter toggle.
-    """
+    """Inject extra CLI flags from the config into sys.argv (before argparse runs)."""
     for arg in config.get("extra_args", []):
         if arg not in sys.argv:
             sys.argv.append(arg)
-
-    try:
-        import modules.content_filter as cf
-        cf.set_adult_filter(config.get("adult_filter_enabled", True))
-    except ImportError:
-        pass

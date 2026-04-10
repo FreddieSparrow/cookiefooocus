@@ -1,5 +1,5 @@
 """
-Cookie-Fooocus Content Safety Filter  —  v2
+Cookie-Fooocus Content Safety Filter  —  v3
 Full bypass-defeat pipeline for prompt and image safety.
 
 Normalisation pipeline (defeats ~80 % of real-world bypass tricks)
@@ -17,7 +17,7 @@ Normalisation pipeline (defeats ~80 % of real-world bypass tricks)
 Detection pipeline
 ──────────────────
   [A] Hard block patterns   (CRITICAL: CSAM, WMD; BLOCK: injection, violence)
-  [B] 18+ adult filter      (if enabled)
+  [B] 18+ adult filter      (ALWAYS ON — cannot be disabled)
   [C] Intent patterns        ("remove her clothes", "undress the subject" …)
   [D] Fuzzy keyword match    (rapidfuzz if available, else edit-distance fallback)
   [E] Risk scoring           (additive score across keyword clusters)
@@ -28,6 +28,9 @@ Output
 ──────
   FilterResult.reason is always generic ("Request blocked by safety policy.")
   — never leaking which specific rule matched (prevents filter tuning by attacker).
+
+All regex patterns are pre-compiled at module load for performance.
+The 18+ adult filter is permanently enabled and cannot be toggled at runtime.
 """
 
 import hashlib
@@ -70,19 +73,14 @@ class FilterResult:
 
 
 # ── Runtime settings ──────────────────────────────────────────────────────────
+# The 18+ adult filter is always enabled and cannot be toggled.
+# Only prompt_filter_enabled and nsfw_image_filter_enabled are runtime settings.
 
 _settings_lock = threading.Lock()
 _settings: dict = {
-    "adult_filter_enabled":      True,
     "prompt_filter_enabled":     True,
     "nsfw_image_filter_enabled": True,
 }
-
-
-def set_adult_filter(enabled: bool) -> None:
-    with _settings_lock:
-        _settings["adult_filter_enabled"] = enabled
-    log.info("[filter] 18+ filter %s", "ENABLED" if enabled else "DISABLED")
 
 
 def get_setting(key: str) -> bool:
@@ -98,7 +96,8 @@ _ALERT_DIR = Path.home() / ".local" / "share" / "cookiefooocus" / "alerts"
 def _write_critical_alert(category: str, user_id: str, evidence: str) -> None:
     try:
         _ALERT_DIR.mkdir(parents=True, exist_ok=True)
-        f = _ALERT_DIR / f"critical-{datetime.now().isoformat()}.json"
+        ts_safe = datetime.now().isoformat().replace(":", "-")
+        f = _ALERT_DIR / f"critical-{ts_safe}.json"
         f.write_text(json.dumps({
             "timestamp":     datetime.now().isoformat(),
             "category":      category,
@@ -344,6 +343,23 @@ WARN_PATTERNS: list[tuple[str, str]] = [
     (r"\b(drug|narcotic).{0,20}\b(make|cook|synthesize|recipe|how\s+to)\b",   "drugs"),
 ]
 
+# ── Pre-compiled pattern tuples (use these in hot paths instead of raw strings)
+_BLOCK_COMPILED: list[tuple[re.Pattern, str, Severity]] = [
+    (re.compile(p, re.IGNORECASE), cat, sev) for p, cat, sev in BLOCK_PATTERNS
+]
+_ADULT_COMPILED: list[tuple[re.Pattern, str]] = [
+    (re.compile(p, re.IGNORECASE), cat) for p, cat in ADULT_PATTERNS
+]
+_INTENT_COMPILED: list[tuple[re.Pattern, str]] = [
+    (re.compile(p, re.IGNORECASE), cat) for p, cat in INTENT_PATTERNS
+]
+_RISK_COMPILED: list[tuple[re.Pattern, int]] = [
+    (re.compile(p, re.IGNORECASE), pts) for p, pts in RISK_CLUSTERS
+]
+_WARN_COMPILED: list[tuple[re.Pattern, str]] = [
+    (re.compile(p, re.IGNORECASE), cat) for p, cat in WARN_PATTERNS
+]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ML INJECTION CLASSIFIER (optional, lazy)
@@ -420,9 +436,9 @@ class PromptFilter:
     def check(self, prompt: str, user_id: str = "anonymous") -> FilterResult:
         n = _normalise(prompt)
 
-        # [A] Hard block patterns
-        for pattern, category, severity in BLOCK_PATTERNS:
-            if re.search(pattern, n, re.IGNORECASE):
+        # [A] Hard block patterns (pre-compiled)
+        for rx, category, severity in _BLOCK_COMPILED:
+            if rx.search(n):
                 _audit(user_id, "block", category, prompt[:200])
                 if severity == Severity.CRITICAL:
                     _write_critical_alert(category, user_id, prompt[:500])
@@ -431,19 +447,18 @@ class PromptFilter:
                     reason=_BLOCKED_REASON, category=category,
                 )
 
-        # [B] Adult filter
-        if get_setting("adult_filter_enabled"):
-            for pattern, category in ADULT_PATTERNS:
-                if re.search(pattern, n, re.IGNORECASE):
-                    _audit(user_id, "block", category, prompt[:200])
-                    return FilterResult(
-                        allowed=False, severity=Severity.BLOCK,
-                        reason=_BLOCKED_REASON, category=category,
-                    )
+        # [B] 18+ adult filter — always enabled, cannot be disabled (pre-compiled)
+        for rx, category in _ADULT_COMPILED:
+            if rx.search(n):
+                _audit(user_id, "block", category, prompt[:200])
+                return FilterResult(
+                    allowed=False, severity=Severity.BLOCK,
+                    reason=_BLOCKED_REASON, category=category,
+                )
 
-        # [C] Intent patterns
-        for pattern, category in INTENT_PATTERNS:
-            if re.search(pattern, n, re.IGNORECASE):
+        # [C] Intent patterns (pre-compiled)
+        for rx, category in _INTENT_COMPILED:
+            if rx.search(n):
                 _audit(user_id, "block", category, prompt[:200])
                 return FilterResult(
                     allowed=False, severity=Severity.BLOCK,
@@ -459,11 +474,8 @@ class PromptFilter:
                     reason=_BLOCKED_REASON, category=f"fuzzy:{word}",
                 )
 
-        # [E] Risk score
-        score = sum(
-            pts for pattern, pts in RISK_CLUSTERS
-            if re.search(pattern, n, re.IGNORECASE)
-        )
+        # [E] Risk score (pre-compiled)
+        score = sum(pts for rx, pts in _RISK_COMPILED if rx.search(n))
         if score >= self.RISK_THRESHOLD:
             _audit(user_id, "block", f"risk-score:{score}", prompt[:200])
             return FilterResult(
@@ -482,14 +494,14 @@ class PromptFilter:
                 score=ml,
             )
 
-        # [G] Warn patterns
-        for pattern, category in WARN_PATTERNS:
-            if re.search(pattern, n, re.IGNORECASE):
+        # [G] Warn patterns (pre-compiled)
+        for rx, category in _WARN_COMPILED:
+            if rx.search(n):
                 _audit(user_id, "warn", category, prompt[:200])
                 return FilterResult(
                     allowed=True, severity=Severity.WARN,
                     reason=_WARN_REASON, category=category,
-                    redacted=re.sub(pattern, "[REDACTED]", prompt, flags=re.IGNORECASE),
+                    redacted=rx.sub("[REDACTED]", prompt),
                 )
 
         return FilterResult(allowed=True, severity=Severity.SAFE)
