@@ -1,0 +1,12 @@
+[
+  {
+    "user": "admin",
+    "pass": "changeme123",
+    "role": "admin"
+  },
+  {
+    "user": "alice",
+    "pass": "AliceSecurePass2025!",
+    "role": "user"
+  }
+]

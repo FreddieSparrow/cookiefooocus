@@ -276,4 +276,11 @@ config.default_base_model_name, config.checkpoint_downloads = download_models(
 config.update_files()
 init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
 
+# ── Performance warm-up (background — safety models pre-loaded) ───────────────
+try:
+    from modules.performance import warm_up
+    warm_up()
+except Exception as _pe:
+    print(f"[Cookie-Fooocus] Performance warm-up skipped: {_pe}")
+
 from webui import *

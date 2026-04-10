@@ -214,11 +214,28 @@ class FooocusExpansion:
     """
     Public drop-in for the original FooocusExpansion class.
     Delegates to Ollama or GPT-2 depending on hardware capability.
+    Caches expansion results to avoid redundant LLM/GPT-2 calls.
     """
 
     def __init__(self):
         self._backend = _build_expansion()
         self.patcher  = getattr(self._backend, "patcher", None)
+        try:
+            from modules.performance import prompt_cache
+            self._cache = prompt_cache
+        except ImportError:
+            self._cache = None
 
     def __call__(self, prompt: str, seed: int) -> str:
-        return self._backend(prompt, seed)
+        if self._cache is not None:
+            cached = self._cache.get(prompt, seed)
+            if cached is not None:
+                log.debug("[expansion] Cache hit for prompt: %s…", prompt[:40])
+                return cached
+
+        result = self._backend(prompt, seed)
+
+        if self._cache is not None and result != prompt:
+            self._cache.put(prompt, seed, result)
+
+        return result

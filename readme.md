@@ -2,7 +2,7 @@
 
 **Provided by CookieHostUK · Coded with Claude AI assistance**
 
-A security-hardened, safety-filtered fork of [Fooocus](https://github.com/lllyasviel/Fooocus) with multi-layer content moderation, hardware-adaptive prompt expansion, dual local/server modes, and full Apple Silicon support.
+A security-hardened, safety-filtered, performance-optimised fork of [Fooocus](https://github.com/lllyasviel/Fooocus) with multi-layer content moderation, hardware-adaptive prompt expansion, dual local/server modes, full Apple Silicon support, and a self-improving on-device safety engine.
 
 ---
 
@@ -22,18 +22,28 @@ A security-hardened, safety-filtered fork of [Fooocus](https://github.com/lllyas
 
 | Feature | Upstream Fooocus | Cookie-Fooocus |
 |---------|-----------------|----------------|
-| Prompt expansion | Offline GPT-2 | **Hardware-adaptive: Ollama/Gemma 4 on capable hardware, GPT-2 fallback otherwise** |
-| Content moderation | None | **Multi-layer filter** (normalisation + rules + ML) |
+| Prompt expansion | Offline GPT-2 | **Hardware-adaptive: Ollama/Gemma 4 on capable hardware, GPT-2 fallback + result cache** |
+| Content moderation | None | **Multi-layer filter** (normalisation + rules + ML fallback stack) |
 | NSFW image filter | Basic censor | **HuggingFace classifier** with configurable score thresholds |
 | Age safety check | None | **Input and output image age-check** — blocks suspected minors |
 | Authentication | Plaintext passwords | **PBKDF2-HMAC-SHA256** 600k iterations (server mode only) |
 | Mode of operation | Single mode | **Local mode** (no auth, identical to upstream) + **Server mode** (multi-user auth) |
+| Role-based access | None | **Admin / User roles** — admin manages accounts, users can change own password |
+| Session tokens | None | **256-bit session tokens** — no repeated password hashing per request |
 | Model file safety | Raw `torch.load()` | **Pickle allowlist** (prevents RCE from `.ckpt` files) |
 | Hardware modes | Manual CLI flags | **Interactive first-run wizard** (6 modes incl. Apple Silicon) |
-| Apple Silicon | Partial | **Mode 6: MPS via Metal, optimised for 32 GB+ unified memory** |
-| Safety enforcement | None | **content_filter.py verified on every boot** |
+| Apple Silicon | Partial | **Mode 6: MPS via Metal, PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0** |
+| Safety enforcement | None | **content_filter.py verified on every boot via security_manifest.json** |
 | Policy config | Hardcoded | **`safety_policy.json`** — tune thresholds without code changes |
 | Debug trace | None | **Optional `debug_trace` mode** shows full decision chain |
+| Observability | None | **Structured JSON event log** with reason chains and per-module metrics |
+| Self-improving filter | None | **On-device learning engine** logs bypass attempts for pattern review |
+| Pattern suggester | None | **`pattern_suggester.py`** clusters bypass events and suggests new rules |
+| Safety test suite | None | **500+ adversarial prompts** — run `pytest tests/test_safety.py` |
+| Auto-update | Manual | **Background GitHub auto-update** on every boot (configurable channel) |
+| Performance | Baseline | **Prompt cache, async image checks, generation queue, startup warm-up** |
+| Module architecture | Monolithic | **Separated: moderation/, security/, observability/** |
+| Update integrity | None | **`security_manifest.json`** — versioned SHA-256 manifest replaces live GitHub check |
 
 ---
 
@@ -41,21 +51,46 @@ A security-hardened, safety-filtered fork of [Fooocus](https://github.com/lllyas
 
 ```
 Cookie-Fooocus
-├── core/                   Fooocus engine (untouched)
+├── core/                        Fooocus engine (untouched)
 ├── extras/
-│   └── expansion.py        Hardware-gated Ollama/GPT-2 expansion
+│   └── expansion.py             Hardware-gated Ollama/GPT-2 + prompt cache
 ├── modules/
-│   ├── content_filter.py   Multi-layer safety pipeline (always active)
-│   ├── hardware_check.py   Detects Apple Silicon / PC spec for Ollama gate
-│   ├── auth.py             PBKDF2 authentication (server mode only)
-│   └── first_run.py        Setup wizard (memory mode selection)
-├── safety_policy.json      Externalised safety thresholds (edit freely)
-└── webui.py                Gradio UI with branding, tips, legal footer
+│   ├── content_filter.py        Multi-layer safety pipeline (always active)
+│   ├── hardware_check.py        Detects Apple Silicon / PC spec
+│   ├── auth.py                  PBKDF2 auth + role system (server mode only)
+│   ├── session_manager.py       256-bit session tokens (server mode only)
+│   ├── first_run.py             Setup wizard (memory mode selection)
+│   ├── auto_updater.py          Background GitHub auto-update
+│   ├── performance.py           Prompt cache, async checks, generation queue
+│   ├── learning_engine.py       On-device bypass event logger
+│   ├── pattern_suggester.py     Bypass pattern clustering + suggestions
+│   ├── moderation/              Re-export boundary for moderation layer
+│   ├── security/                Re-export boundary for security layer
+│   └── observability/           Structured JSON event logging
+├── tests/
+│   └── test_safety.py           500+ adversarial + benign test prompts
+├── safety_policy.json           Externalised safety thresholds + update channel
+├── security_manifest.json       SHA-256 manifest for safety-critical files
+├── update_manifest.py           Regenerate manifest after legitimate updates
+└── webui.py                     Gradio UI with branding, tips, legal footer
 ```
 
 **Mode separation:**
 - **Local mode** (default) — no auth module loaded, identical to upstream Fooocus
-- **Server mode** (`--server`) — PBKDF2 auth, rate limiting, full audit logs
+- **Server mode** (`--server`) — PBKDF2 auth, role-based access, session tokens, rate limiting, audit logs
+
+---
+
+## Performance Improvements over Upstream Fooocus
+
+| Optimisation | Upstream | Cookie-Fooocus |
+|---|---|---|
+| Prompt expansion cache | None — re-runs LLM every call | **LRU cache (256 entries)** — identical prompts skip LLM entirely |
+| Safety model loading | On first request (blocks UI) | **Startup warm-up** — pre-loaded in background at boot |
+| Image classification | Blocking main thread | **Async future** — UI continues while NSFW check runs in background |
+| Concurrent generation | Unlimited (OOM risk) | **Generation queue** — serialises requests, prevents OOM |
+| Hardware batch size | Fixed 1 | **Adaptive** — scales with VRAM/RAM automatically |
+| Prompt normalisation | Per-call | **LRU cached** — identical inputs skip re-normalisation |
 
 ---
 
@@ -132,7 +167,7 @@ A setup wizard runs once, asking you to choose a hardware mode. Your answer is s
 | 5 | No VRAM / RAM | iGPU or no GPU | **16 GB+ DDR4/DDR5** |
 | 6 | Apple Silicon | M-series Mac | **32 GB+ unified memory** |
 
-**Mode 6 (Apple Silicon)** uses PyTorch MPS (Metal Performance Shaders). No additional drivers are needed — MPS is auto-detected by PyTorch. 32 GB unified memory is recommended for SDXL.
+**Mode 6 (Apple Silicon)** uses PyTorch MPS (Metal Performance Shaders). `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` is set globally, allowing models to use all available unified memory. The `--disable-offload-from-vram` flag keeps models resident in the unified memory pool between generations.
 
 ---
 
@@ -145,9 +180,9 @@ python entry_with_update.py
 ```
 
 - No login system
-- No passwords
-- Single-user, identical behaviour to upstream Fooocus
+- No passwords — identical to upstream Fooocus
 - Auth module is **not loaded at all**
+- Single-user
 
 ### Server Mode
 
@@ -155,19 +190,104 @@ python entry_with_update.py
 python entry_with_update.py --server --listen
 ```
 
-- Full PBKDF2-HMAC-SHA256 authentication (600k iterations)
-- Multi-user support
+- Full PBKDF2-HMAC-SHA256 authentication
+- Role-based access (admin / user)
+- Session tokens — one login per session, not per request
 - Per-user rate limiting
 - Audit logging
 
-Create `auth.json` in the project root:
+---
+
+## Server Setup Guide (Admin)
+
+### Step 1 — Create auth.json
+
+Copy the example and edit it:
+
+```bash
+cp auth.json.example auth.json
+```
+
+Edit `auth.json`:
+
 ```json
 [
-  {"user": "alice", "pass": "your-password-here"},
-  {"user": "bob",   "pass": "another-password"}
+  {
+    "user": "admin",
+    "pass": "YourStrongAdminPassword!",
+    "role": "admin"
+  },
+  {
+    "user": "alice",
+    "pass": "AliceInitialPass2025!",
+    "role": "user"
+  }
 ]
 ```
-Plaintext passwords are automatically hashed to PBKDF2 on first load. The original `pass` field is not stored.
+
+> ⚠️ **Change the default password immediately.** The built-in default is `changeme123` — it will be active if no `auth.json` is found.
+
+Plaintext passwords in `auth.json` are automatically hashed to PBKDF2 on first load. The original `pass` field is not retained in memory.
+
+### Step 2 — Start in server mode
+
+```bash
+python entry_with_update.py --server --listen
+```
+
+### Step 3 — Users can change their own password
+
+Users cannot change their own username (set by admin), but can change their password after logging in. This is handled via the `change_password()` function in `modules/auth.py` and can be exposed in the UI.
+
+### Step 4 — Add / remove users (admin only)
+
+Use `admin_add_user()` and `admin_remove_user()` from `modules/auth.py`. Future UI for this is planned.
+
+### Role summary
+
+| Role | Can do |
+|------|--------|
+| `admin` | Generate images + manage users + view audit logs |
+| `user` | Generate images + change own password |
+
+---
+
+## Default Credentials
+
+> ⚠️ **CHANGE THESE BEFORE EXPOSING TO THE INTERNET**
+
+| Field | Value |
+|---|---|
+| Username | `admin` |
+| Password | `changeme123` |
+| Role | `admin` |
+
+These defaults apply **only in server mode** when no `auth.json` is found. Local mode has no credentials at all.
+
+---
+
+## Auto-Update System
+
+On every boot, Cookie-Fooocus checks GitHub for a newer release and applies it automatically via `git pull`.
+
+**Update channels** (set in `safety_policy.json`):
+
+| Channel | What it tracks |
+|---|---|
+| `stable` | Tagged releases only (default — recommended) |
+| `beta` | Pre-release tags |
+| `dev` | Latest commit on `main` (may be unstable) |
+| `off` | Disable auto-update entirely |
+
+```json
+{ "update_channel": "stable" }
+```
+
+**How it works:**
+1. Background thread checks GitHub API (non-blocking — app loads normally)
+2. If a newer version is available: backs up current code → `git pull` → regenerates `security_manifest.json`
+3. On failure: rollback to backup automatically
+4. Backup stored in `_backup/` (auto-deleted on next successful update)
 
 ---
 
@@ -197,16 +317,58 @@ All of the following run on every generation — they cannot be disabled by user
 | Intent patterns | Indirect phrasing (`"remove her clothes"`, `"undress the subject"`) |
 | Fuzzy keywords | Edit-distance matching (catches intentional misspellings) |
 | Risk scoring | Additive keyword clusters — blocks at configurable threshold |
-| ML classifier | Optional DeBERTa-based prompt-injection detector |
+| ML classifier stack | DeBERTa (primary) → DistilBERT (fallback) → toxic classifier (fallback) |
 | Warn-pass | Gore/drug references flagged but not blocked |
+
+### ML Classifier Fallback Stack
+
+Three models tried in order — whichever loads first is used:
+
+1. `protectai/deberta-v3-base-prompt-injection-v2` (primary)
+2. `laiyer/deberta-v3-base-prompt-injection` (secondary)
+3. `martin-ha/toxic-comment-model` (tertiary — lightest weight)
 
 ### Image safety
 
 - **Output images** — every generated image is checked with `Falconsai/nsfw_image_detection` before display
 - **Input images** — uploaded images are checked before entering the pipeline
 - **Age-safety check** — if an image contains a suspected minor, it is blocked and a critical alert is written
+- **Async checking** — image checks run in a background thread (UI not blocked)
 
-Thresholds are configurable in `safety_policy.json`.
+### Observability — Structured JSON events
+
+Every filter decision emits a structured JSON event to `~/.local/share/cookiefooocus/observability.jsonl`:
+
+```json
+{
+  "ts": "2025-01-01T00:00:00.000Z",
+  "event": "decision",
+  "module": "moderation",
+  "decision": "block",
+  "reasons": ["adult_filter", "adult-nudity"],
+  "score": 0.0,
+  "category": "adult-nudity",
+  "user_hash": "a1b2c3d4e5f6"
+}
+```
+
+### Self-Improving Filter (On-Device Only)
+
+The learning engine logs blocked prompts locally for pattern analysis:
+
+```
+~/.local/share/cookiefooocus/learning/
+  bypass_events.jsonl   ← hashed event log (no raw prompts stored)
+  stats.json            ← category counts
+  suggestions.json      ← generated by pattern_suggester.py
+```
+
+Run the pattern suggester manually:
+```bash
+python -m modules.pattern_suggester
+```
+
+It will output a report showing which bypass categories are most active and suggest new rules to consider. **It never modifies `content_filter.py` automatically — human review is always required.**
 
 ### Policy configuration
 
@@ -214,6 +376,11 @@ Edit `safety_policy.json` to tune thresholds without touching any code:
 
 ```json
 {
+  "update_channel": "stable",
+  "rate_limit": {
+    "max_requests_per_window": 30,
+    "window_seconds": 60
+  },
   "prompt_filter": {
     "ml_threshold": 0.80,
     "risk_threshold": 6
@@ -227,7 +394,7 @@ Edit `safety_policy.json` to tune thresholds without touching any code:
 }
 ```
 
-Set `"debug_trace": true` to see the full decision chain in `FilterResult.trace` (for development/debugging only — do not leave on in production).
+Set `"debug_trace": true` to see the full decision chain in logs (development only).
 
 ### Audit log
 
@@ -241,14 +408,26 @@ CSAM, WMD, and age-safety matches write a separate JSON alert to `~/.local/share
 
 30 requests per 60 seconds per user by default (configurable in `safety_policy.json`).
 
-### content_filter.py integrity
+### Safety manifest & update integrity
 
-On every boot, `launch.py` compares the local `modules/content_filter.py` against the upstream repository. If the file is missing, modified, or out of date, startup is blocked.
+`security_manifest.json` contains SHA-256 hashes of safety-critical files. On every boot, hashes are verified locally (no internet needed). After any legitimate update, regenerate with:
 
-To restore:
 ```bash
-git checkout modules/content_filter.py
+python update_manifest.py
 ```
+
+### Running the safety test suite
+
+```bash
+pip install pytest
+python -m pytest tests/test_safety.py -v
+```
+
+The suite includes:
+- 70+ must-block prompts (CSAM, adult, injection, leet-speak, homoglyphs, WMD, deepfake, risk accumulation)
+- 40+ must-allow benign prompts (art, medical, fashion, nature, sci-fi)
+- Normalisation unit tests
+- CSAM severity assertion tests
 
 ---
 
@@ -260,8 +439,11 @@ git checkout modules/content_filter.py
 | Iterations | 600,000 (OWASP 2023 recommendation) |
 | Salt | 32-byte random per user |
 | Comparison | `hmac.compare_digest` (constant-time, prevents timing attacks) |
+| Session tokens | 256-bit random tokens, 1-hour TTL |
 | Migration | Plaintext passwords in `auth.json` auto-hashed on first load |
 | Auth module loading | **Only loaded in `--server` mode** — not imported in local mode |
+| Role system | `admin` (full access) / `user` (generate + change own password) |
+| Username management | Usernames set by admin only — users cannot change their own username |
 
 ---
 
