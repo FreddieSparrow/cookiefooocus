@@ -26,12 +26,13 @@ from pathlib import Path
 _CONFIG_PATH = Path.home() / ".config" / "cookiefooocus" / "first_run.json"
 
 # ── Allowed values (strict allowlist — anything else is tampered/corrupt) ─────
-_VALID_MODES   = {"1", "2", "3", "4"}
+_VALID_MODES   = {"1", "2", "3", "4", "5"}
 _VALID_ARGS    = {
     "1": [],
     "2": ["--always-low-vram"],
     "3": ["--always-cpu"],
     "4": [],
+    "5": ["--always-no-vram", "--unet-in-fp8-e4m3fn", "--vae-in-cpu"],
 }
 
 MEMORY_MODES = {
@@ -39,6 +40,10 @@ MEMORY_MODES = {
     "2": {"label": "Low VRAM  — GPU with < 4 GB VRAM (slower but compatible)",         "args": ["--always-low-vram"]},
     "3": {"label": "CPU / RAM — No GPU required (slowest, uses system RAM only)",      "args": ["--always-cpu"]},
     "4": {"label": "Auto-detect — Cookie-Fooocus chooses based on available hardware", "args": []},
+    "5": {
+        "label": "No VRAM / 16 GB RAM minimum — iGPU, server, or no dedicated GPU (requires 16 GB+ DDR4/DDR5)",
+        "args":  ["--always-no-vram", "--unet-in-fp8-e4m3fn", "--vae-in-cpu"],
+    },
 }
 
 
@@ -152,12 +157,16 @@ def _prompt_memory_mode() -> dict:
         print(f"  [{key}] {info['label']}")
     print()
     while True:
-        choice = input("Enter choice [1-4] (default 4 = auto): ").strip() or "4"
+        choice = input("Enter choice [1-5] (default 4 = auto): ").strip() or "4"
         if choice in MEMORY_MODES:
             info = MEMORY_MODES[choice]
-            print(f"\n  Selected: {info['label']}\n")
+            print(f"\n  Selected: {info['label']}")
+            if choice == "5":
+                print("  NOTE: Mode 5 requires at least 16 GB of system RAM (DDR4 or DDR5).")
+                print("        Running with less will cause out-of-memory errors.")
+            print()
             return {"memory_mode": choice, "extra_args": info["args"]}
-        print("  Please enter 1, 2, 3, or 4.")
+        print("  Please enter 1, 2, 3, 4, or 5.")
 
 
 def _prompt_adult_filter() -> bool:

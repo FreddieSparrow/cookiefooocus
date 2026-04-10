@@ -132,7 +132,7 @@ See the [upstream documentation](https://github.com/lllyasviel/Fooocus) for the 
 
 ## Installation
 
-Same as upstream Fooocus. Clone this repo instead of the original:
+Clone this repo instead of the original:
 
 ```bash
 git clone https://github.com/FreddieSparrow/cookiefooocus.git
@@ -143,6 +143,8 @@ pip install -r requirements_versions.txt
 python entry_with_update.py
 ```
 
+On first launch a setup wizard runs and asks two questions: your memory mode and whether to enable the adult content filter. The choice is saved and never asked again (delete `~/.config/cookiefooocus/first_run.json` to re-run it).
+
 Optional dependencies for full filter functionality:
 ```bash
 pip install rapidfuzz          # faster fuzzy matching (graceful fallback if absent)
@@ -152,11 +154,55 @@ pip install Pillow             # image filter (likely already installed)
 
 ---
 
-## Hardware Requirements
+## Hardware Requirements & Memory Modes
 
-Same as upstream — see [lllyasviel/Fooocus#minimal-requirement](https://github.com/lllyasviel/Fooocus#minimal-requirement).
+On first launch the wizard offers five modes:
 
-Minimum: 4GB Nvidia VRAM, 8GB RAM.
+| # | Mode | Who it's for | Flags applied |
+|---|------|-------------|---------------|
+| 1 | **GPU (VRAM)** | NVIDIA/AMD GPU with 4 GB+ VRAM | _(none — full speed)_ |
+| 2 | **Low VRAM** | GPU with < 4 GB VRAM | `--always-low-vram` |
+| 3 | **CPU / RAM** | No GPU at all | `--always-cpu` |
+| 4 | **Auto-detect** | Let Cookie-Fooocus decide | _(none — runtime detection)_ |
+| 5 | **No VRAM / 16 GB RAM** | iGPU, server hardware, or no dedicated GPU — **requires 16 GB+ system RAM** | `--always-no-vram --unet-in-fp8-e4m3fn --vae-in-cpu` |
+
+### Mode 5 — No VRAM / 16 GB DDR4/DDR5 (server & iGPU builds)
+
+This mode requires **at least 16 GB of system RAM** (DDR4 or DDR5). Running with less will cause out-of-memory errors. It is designed for machines that have 16 GB+ system RAM but no dedicated GPU VRAM — including:
+
+- Servers with integrated graphics or no display GPU
+- Laptops/desktops with Intel/AMD integrated graphics
+- Multi-tenant systems where VRAM is shared between processes
+- CPU-only builds where you still want to minimise RAM usage
+
+Three flags are applied together:
+
+| Flag | Effect |
+|------|--------|
+| `--always-no-vram` | Models live in system RAM; GPU is used for compute only (no VRAM residency). Falls back gracefully to CPU if no GPU is present. |
+| `--unet-in-fp8-e4m3fn` | Quantises the UNet to FP8 — roughly halves its memory footprint (~6.9 GB → ~3.5 GB in fp16→fp8) |
+| `--vae-in-cpu` | Keeps the VAE decoder on CPU RAM, eliminating any VRAM spike during image decode |
+
+**Approximate memory usage in mode 5 (SDXL):**
+
+| Component | fp16 | fp8 (mode 5) |
+|-----------|------|--------------|
+| UNet | ~6.9 GB | ~3.5 GB |
+| VAE | ~335 MB | ~335 MB (CPU) |
+| CLIP x2 | ~1.5 GB | ~1.5 GB |
+| **Total** | **~8.7 GB** | **~5.3 GB** |
+
+This fits comfortably in 16 GB DDR4/DDR5 with room for the OS and Python overhead.
+
+Generation will be slower than dedicated-GPU mode (expect ~5–15× depending on hardware), but the output quality is identical — FP8 quantisation affects speed, not image fidelity at SDXL scale.
+
+You can also set mode 5 manually without the wizard:
+
+```bash
+python entry_with_update.py --always-no-vram --unet-in-fp8-e4m3fn --vae-in-cpu
+```
+
+For Docker / CI / non-interactive environments the wizard is skipped and auto-detect (mode 4) is used automatically.
 
 ---
 
