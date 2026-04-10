@@ -39,11 +39,11 @@ import time
 import unicodedata
 import base64
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from math import log2
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("cookiefooocus.filter")
 
@@ -127,7 +127,6 @@ _HOMOGLYPHS: dict[str, str] = {
     '\u0443': 'y', '\u0423': 'y',  # у У
     '\u0455': 's',                  # ѕ
     '\u0458': 'j',                  # ј
-    '\u0441': 'c',                  # с (again, Cyrillic c)
     # Greek
     '\u03b1': 'a',  # α
     '\u03b5': 'e',  # ε
@@ -137,7 +136,7 @@ _HOMOGLYPHS: dict[str, str] = {
     '\u03bd': 'v',  # ν
     # Fullwidth Latin (covered by NFKC but belt-and-suspenders)
     '\uff41': 'a', '\uff45': 'e', '\uff49': 'i', '\uff4f': 'o', '\uff55': 'u',
-    '\uff53': 's', '\uff45': 'e', '\uff38': 'r', '\uff38': 'r',
+    '\uff53': 's', '\uff38': 'r',
     # Lookalike punctuation used as letters
     '\u00f8': 'o',  # ø
     '\u00f6': 'o',  # ö
@@ -153,6 +152,17 @@ _LEET: dict = str.maketrans({
 
 # Spaced-word collapse: "s e x" → "sex"  (2+ single chars separated by spaces)
 _RE_SPACED = re.compile(r'(?<!\w)(\w)(?: +(\w)){1,}(?!\w)')
+
+
+def _high_entropy(s: str, threshold: float = 4.5) -> bool:
+    """Return True if Shannon entropy of s meets threshold — gates base64 decoding."""
+    if not s:
+        return False
+    freq: dict[str, int] = {}
+    for c in s:
+        freq[c] = freq.get(c, 0) + 1
+    n = len(s)
+    return -sum((f / n) * log2(f / n) for f in freq.values()) >= threshold
 
 
 def _collapse_spaced(text: str) -> str:
@@ -194,18 +204,6 @@ def _normalise(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
 
     # 9. Base64 payload sniffing (decode + append so patterns catch encoded text)
-    #    Guard: only decode if Shannon entropy is high enough to be real base64
-    #    (prevents CPU exhaustion and false-positives on normal prose fragments)
-    def _high_entropy(s: str, threshold: float = 4.5) -> bool:
-        from math import log2
-        if not s:
-            return False
-        freq = {}
-        for c in s:
-            freq[c] = freq.get(c, 0) + 1
-        n = len(s)
-        return -sum((f / n) * log2(f / n) for f in freq.values()) >= threshold
-
     for match in re.findall(r'[A-Za-z0-9+/]{20,64}={0,2}', text)[:3]:
         if not _high_entropy(match):
             continue
@@ -531,6 +529,13 @@ def _load_nsfw_clf():
 
 class ImageFilter:
     NSFW_THRESHOLD = 0.65
+    # Known NSFW label names across common Hugging Face classifiers.
+    # Explicit set avoids fragile substring matching and handles models
+    # that use numeric labels ("LABEL_1") or alternate spellings.
+    NSFW_LABELS = frozenset({
+        "nsfw", "explicit", "porn", "pornographic", "hentai",
+        "sexy", "label_1", "1", "unsafe",
+    })
 
     def check(self, image_path: str, user_id: str = "anonymous") -> FilterResult:
         if not get_setting("nsfw_image_filter_enabled"):
@@ -544,20 +549,12 @@ class ImageFilter:
         if clf is None:
             return FilterResult(allowed=True, severity=Severity.WARN,
                                 reason="NSFW classifier unavailable")
-        # Known NSFW label names across common Hugging Face classifiers.
-        # Explicit set avoids fragile substring matching and handles models
-        # that use numeric labels ("LABEL_1") or alternate spellings.
-        _NSFW_LABELS = frozenset({
-            "nsfw", "explicit", "porn", "pornographic", "hentai",
-            "sexy", "label_1", "1", "unsafe",
-        })
-
         try:
             img        = _PILImage.open(image_path).convert("RGB")
             results    = clf(img)
             nsfw_score = max(
                 (r["score"] for r in results
-                 if r["label"].lower() in _NSFW_LABELS),
+                 if r["label"].lower() in self.NSFW_LABELS),
                 default=0.0,
             )
             if nsfw_score >= self.NSFW_THRESHOLD:

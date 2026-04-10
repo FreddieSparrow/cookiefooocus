@@ -1,5 +1,4 @@
 import os
-import ssl
 import sys
 
 print('[System ARGV] ' + str(sys.argv))
@@ -15,6 +14,71 @@ if "GRADIO_SERVER_PORT" not in os.environ:
 
 # SSL certificate verification is enabled (default Python behaviour).
 # Do NOT disable it — doing so allows MITM attacks when downloading models.
+
+# ── Content filter integrity check ───────────────────────────────────────────
+# content_filter.py is safety-critical. We verify it is present, unmodified
+# (via SHA-256), and up to date with the upstream repository before launch.
+# If it fails any check, startup is aborted.
+import hashlib
+import urllib.request
+import urllib.error
+
+_FILTER_PATH = os.path.join(root, "modules", "content_filter.py")
+_FILTER_REMOTE = (
+    "https://raw.githubusercontent.com/FreddieSparrow/cookiefooocus/main/"
+    "modules/content_filter.py"
+)
+
+
+def _abort(reason: str) -> None:
+    print(f"\n{'='*60}")
+    print(f"  STARTUP BLOCKED — {reason}")
+    print(f"{'='*60}")
+    print("  content_filter.py is required and must not be modified.")
+    print("  To restore it, run:")
+    print("    git checkout modules/content_filter.py")
+    print(f"{'='*60}\n")
+    sys.exit(1)
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_content_filter() -> None:
+    # 1. Must exist
+    if not os.path.isfile(_FILTER_PATH):
+        _abort("modules/content_filter.py is missing")
+
+    local_hash = _sha256_file(_FILTER_PATH)
+
+    # 2. Check against upstream (non-fatal if offline — warns only)
+    try:
+        req = urllib.request.Request(_FILTER_REMOTE, headers={"User-Agent": "cookiefooocus"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            remote_bytes = resp.read()
+        remote_hash = hashlib.sha256(remote_bytes).hexdigest()
+
+        if local_hash != remote_hash:
+            _abort(
+                "modules/content_filter.py has been modified or is out of date.\n"
+                f"  Local  SHA-256: {local_hash}\n"
+                f"  Remote SHA-256: {remote_hash}"
+            )
+        print("[Cookie-Fooocus] content_filter.py verified against upstream.")
+    except urllib.error.URLError:
+        # Offline — skip remote check, local file still required
+        print("[Cookie-Fooocus] Offline — skipping remote content_filter.py check.")
+    except Exception as exc:
+        print(f"[Cookie-Fooocus] content_filter.py remote check failed ({exc}) — continuing.")
+
+
+_verify_content_filter()
+# ─────────────────────────────────────────────────────────────────────────────
 
 import platform
 import fooocus_version

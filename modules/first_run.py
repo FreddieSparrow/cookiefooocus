@@ -38,7 +38,7 @@ _VALID_ARGS    = {
 MEMORY_MODES = {
     "1": {"label": "GPU (VRAM) — Fastest, requires NVIDIA/AMD GPU with 4 GB+ VRAM",   "args": []},
     "2": {"label": "Low VRAM  — GPU with < 4 GB VRAM (slower but compatible)",         "args": ["--always-low-vram"]},
-    "3": {"label": "CPU / RAM — No GPU required (slowest, uses system RAM only)",      "args": ["--always-cpu"]},
+    "3": {"label": "CPU only — No GPU, requires 64 GB+ RAM (very slow, high-core-count servers)",  "args": ["--always-cpu"]},
     "4": {"label": "Auto-detect — Cookie-Fooocus chooses based on available hardware", "args": []},
     "5": {
         "label": "No VRAM / 16 GB RAM minimum — iGPU, server, or no dedicated GPU (requires 16 GB+ DDR4/DDR5)",
@@ -161,6 +161,10 @@ def _prompt_memory_mode() -> dict:
         if choice in MEMORY_MODES:
             info = MEMORY_MODES[choice]
             print(f"\n  Selected: {info['label']}")
+            if choice == "3":
+                print("  NOTE: Mode 3 requires at least 64 GB of system RAM.")
+                print("        It is intended for high-core-count servers with no GPU.")
+                print("        Generation will be very slow (10-20+ minutes per image).")
             if choice == "5":
                 print("  NOTE: Mode 5 requires at least 16 GB of system RAM (DDR4 or DDR5).")
                 print("        Running with less will cause out-of-memory errors.")

@@ -24,10 +24,13 @@ def _hash_password(password: str, salt: bytes | None = None) -> str:
 def _verify_password(password: str, stored: str) -> bool:
     """Constant-time comparison to prevent timing attacks."""
     if stored.startswith("$pbkdf2$"):
-        _, _, salt_hex, dk_hex = stored.split("$")
-        salt = bytes.fromhex(salt_hex)
-        dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 600_000)
-        return hmac.compare_digest(dk.hex(), dk_hex)
+        try:
+            _, _, salt_hex, dk_hex = stored.split("$")
+            salt = bytes.fromhex(salt_hex)
+            dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 600_000)
+            return hmac.compare_digest(dk.hex(), dk_hex)
+        except (ValueError, IndexError):
+            return False
     else:
         # Legacy: bare SHA-256 hex (backwards compat with old auth-example.json)
         candidate = hashlib.sha256(password.encode('utf-8')).hexdigest()

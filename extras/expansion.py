@@ -1,129 +1,122 @@
-# Fooocus GPT2 Expansion
-# Algorithm created by Lvmin Zhang at 2023, Stanford
-# If used inside Fooocus, any use is permitted.
-# If used outside Fooocus, only non-commercial use is permitted (CC-By NC 4.0).
-# This applies to the word list, vocab, model, and algorithm.
-
+# Cookie-Fooocus Prompt Expansion — Ollama / Gemma 4 backend
+# Replaces the original GPT-2 Fooocus V2 expansion engine with a local
+# Ollama-served Gemma 4 model.  The public interface is identical so the
+# rest of the codebase requires no changes.
+#
+# Requirements:
+#   • Ollama running locally  (https://ollama.com)
+#   • Gemma 4 pulled:  ollama pull gemma4
+#
+# The Ollama server is expected at http://localhost:11434 by default.
+# Override with the environment variable OLLAMA_HOST, e.g.:
+#   OLLAMA_HOST=http://192.168.1.10:11434 python entry_with_update.py
 
 import os
-import torch
-import math
-import ldm_patched.modules.model_management as model_management
+import json
+import random
+import urllib.request
+import urllib.error
+import logging
 
-from transformers.generation.logits_process import LogitsProcessorList
-from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
-from modules.config import path_fooocus_expansion
-from ldm_patched.modules.model_patcher import ModelPatcher
+log = logging.getLogger("cookiefooocus.expansion")
+
+_OLLAMA_HOST  = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+_OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4")
+
+_SYSTEM_PROMPT = (
+    "You are a creative assistant that improves image generation prompts. "
+    "When given a short or simple prompt, expand it into a rich, detailed description "
+    "suitable for a high-quality image generator. "
+    "Add specific details about lighting, composition, style, mood, and texture. "
+    "Return ONLY the expanded prompt text — no explanations, no preamble, no quotes. "
+    "Keep the result under 150 words."
+)
 
 
-# limitation of np.random.seed(), called from transformers.set_seed()
-SEED_LIMIT_NUMPY = 2**32
-neg_inf = - 8192.0
-
-
-def safe_str(x):
+def safe_str(x: str) -> str:
+    """Strip leading/trailing punctuation and collapse whitespace."""
     x = str(x)
     for _ in range(16):
-        x = x.replace('  ', ' ')
+        x = x.replace("  ", " ")
     return x.strip(",. \r\n")
 
 
-def remove_pattern(x, pattern):
-    for p in pattern:
-        x = x.replace(p, '')
-    return x
-
-
 class FooocusExpansion:
+    """
+    Drop-in replacement for the original GPT-2 FooocusExpansion.
+    Uses Ollama with Gemma 4 for prompt expansion.
+
+    The `patcher` attribute is set to None — the Ollama server manages its
+    own memory.  default_pipeline.py skips GPU loading when patcher is None.
+    """
+
+    patcher = None  # No GPU patcher needed — Ollama manages its own memory
+
     def __init__(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(path_fooocus_expansion)
+        self._check_ollama()
 
-        positive_words = open(os.path.join(path_fooocus_expansion, 'positive.txt'),
-                              encoding='utf-8').read().splitlines()
-        positive_words = ['Ġ' + x.lower() for x in positive_words if x != '']
+    def _check_ollama(self) -> None:
+        """Verify Ollama is reachable and the model is available at startup."""
+        try:
+            url = f"{_OLLAMA_HOST}/api/tags"
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                data = json.loads(resp.read())
+            models = [m["name"].split(":")[0] for m in data.get("models", [])]
+            if _OLLAMA_MODEL not in models:
+                log.warning(
+                    "[expansion] Model '%s' not found in Ollama. "
+                    "Run: ollama pull %s", _OLLAMA_MODEL, _OLLAMA_MODEL
+                )
+            else:
+                log.info("[expansion] Ollama / %s ready at %s", _OLLAMA_MODEL, _OLLAMA_HOST)
+        except Exception as exc:
+            log.warning(
+                "[expansion] Could not reach Ollama at %s (%s). "
+                "Prompt expansion will pass through unchanged.", _OLLAMA_HOST, exc
+            )
 
-        self.logits_bias = torch.zeros((1, len(self.tokenizer.vocab)), dtype=torch.float32) + neg_inf
+    def __call__(self, prompt: str, seed: int) -> str:
+        """
+        Expand prompt using Gemma 4 via Ollama.
+        Returns the original prompt unchanged if Ollama is unavailable.
+        """
+        if not prompt or not prompt.strip():
+            return ""
 
-        debug_list = []
-        for k, v in self.tokenizer.vocab.items():
-            if k in positive_words:
-                self.logits_bias[0, v] = 0
-                debug_list.append(k[1:])
+        prompt = safe_str(prompt)
 
-        print(f'Fooocus V2 Expansion: Vocab with {len(debug_list)} words.')
+        # Use seed to influence temperature slightly for reproducibility
+        rng = random.Random(int(seed))
+        temperature = round(0.7 + rng.uniform(-0.1, 0.1), 2)
 
-        # debug_list = '\n'.join(sorted(debug_list))
-        # print(debug_list)
+        payload = json.dumps({
+            "model":  _OLLAMA_MODEL,
+            "prompt": prompt,
+            "system": _SYSTEM_PROMPT,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "seed":        int(seed) % (2 ** 31),
+                "num_predict": 200,
+            },
+        }).encode()
 
-        # t11 = self.tokenizer(',', return_tensors="np")
-        # t198 = self.tokenizer('\n', return_tensors="np")
-        # eos = self.tokenizer.eos_token_id
+        try:
+            req = urllib.request.Request(
+                f"{_OLLAMA_HOST}/api/generate",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+            expanded = safe_str(result.get("response", ""))
+            if expanded:
+                log.debug("[expansion] '%s' → '%s'", prompt[:60], expanded[:60])
+                return expanded
+        except urllib.error.URLError as exc:
+            log.warning("[expansion] Ollama unreachable: %s — using original prompt.", exc)
+        except Exception as exc:
+            log.warning("[expansion] Expansion failed: %s — using original prompt.", exc)
 
-        self.model = AutoModelForCausalLM.from_pretrained(path_fooocus_expansion)
-        self.model.eval()
-
-        load_device = model_management.text_encoder_device()
-        offload_device = model_management.text_encoder_offload_device()
-
-        # MPS hack
-        if model_management.is_device_mps(load_device):
-            load_device = torch.device('cpu')
-            offload_device = torch.device('cpu')
-
-        use_fp16 = model_management.should_use_fp16(device=load_device)
-
-        if use_fp16:
-            self.model.half()
-
-        self.patcher = ModelPatcher(self.model, load_device=load_device, offload_device=offload_device)
-        print(f'Fooocus Expansion engine loaded for {load_device}, use_fp16 = {use_fp16}.')
-
-    @torch.no_grad()
-    @torch.inference_mode()
-    def logits_processor(self, input_ids, scores):
-        assert scores.ndim == 2 and scores.shape[0] == 1
-        self.logits_bias = self.logits_bias.to(scores)
-
-        bias = self.logits_bias.clone()
-        bias[0, input_ids[0].to(bias.device).long()] = neg_inf
-        bias[0, 11] = 0
-
-        return scores + bias
-
-    @torch.no_grad()
-    @torch.inference_mode()
-    def __call__(self, prompt, seed):
-        if prompt == '':
-            return ''
-
-        if self.patcher.current_device != self.patcher.load_device:
-            print('Fooocus Expansion loaded by itself.')
-            model_management.load_model_gpu(self.patcher)
-
-        seed = int(seed) % SEED_LIMIT_NUMPY
-        set_seed(seed)
-        prompt = safe_str(prompt) + ','
-
-        tokenized_kwargs = self.tokenizer(prompt, return_tensors="pt")
-        tokenized_kwargs.data['input_ids'] = tokenized_kwargs.data['input_ids'].to(self.patcher.load_device)
-        tokenized_kwargs.data['attention_mask'] = tokenized_kwargs.data['attention_mask'].to(self.patcher.load_device)
-
-        current_token_length = int(tokenized_kwargs.data['input_ids'].shape[1])
-        max_token_length = 75 * int(math.ceil(float(current_token_length) / 75.0))
-        max_new_tokens = max_token_length - current_token_length
-
-        if max_new_tokens == 0:
-            return prompt[:-1]
-
-        # https://huggingface.co/blog/introducing-csearch
-        # https://huggingface.co/docs/transformers/generation_strategies
-        features = self.model.generate(**tokenized_kwargs,
-                                       top_k=100,
-                                       max_new_tokens=max_new_tokens,
-                                       do_sample=True,
-                                       logits_processor=LogitsProcessorList([self.logits_processor]))
-
-        response = self.tokenizer.batch_decode(features, skip_special_tokens=True)
-        result = safe_str(response[0])
-
-        return result
+        return prompt

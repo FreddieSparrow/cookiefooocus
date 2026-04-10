@@ -56,7 +56,8 @@ def try_load_deprecated_user_path_config():
         return
 
     try:
-        deprecated_config_dict = json.load(open('user_path_config.txt', "r", encoding="utf-8"))
+        with open('user_path_config.txt', "r", encoding="utf-8") as _f:
+            deprecated_config_dict = json.load(_f)
 
         def replace_config(old_key, new_key):
             if old_key in deprecated_config_dict:
@@ -959,15 +960,14 @@ def downloading_safety_checker_model():
 
 
 def download_sam_model(sam_model: str) -> str:
-    match sam_model:
-        case 'vit_b':
-            return downloading_sam_vit_b()
-        case 'vit_l':
-            return downloading_sam_vit_l()
-        case 'vit_h':
-            return downloading_sam_vit_h()
-        case _:
-            raise ValueError(f"sam model {sam_model} does not exist.")
+    if sam_model == 'vit_b':
+        return downloading_sam_vit_b()
+    elif sam_model == 'vit_l':
+        return downloading_sam_vit_l()
+    elif sam_model == 'vit_h':
+        return downloading_sam_vit_h()
+    else:
+        raise ValueError(f"sam model {sam_model} does not exist.")
 
 
 def downloading_sam_vit_b():

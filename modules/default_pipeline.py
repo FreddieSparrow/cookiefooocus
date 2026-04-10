@@ -225,7 +225,10 @@ def prepare_text_encoder(async_call=True):
         # TODO: make sure that this is always called in an async way so that users cannot feel it.
         pass
     assert_model_integrity()
-    ldm_patched.modules.model_management.load_models_gpu([final_clip.patcher, final_expansion.patcher])
+    models_to_load = [final_clip.patcher]
+    if final_expansion is not None and getattr(final_expansion, "patcher", None) is not None:
+        models_to_load.append(final_expansion.patcher)
+    ldm_patched.modules.model_management.load_models_gpu(models_to_load)
     return
 
 
