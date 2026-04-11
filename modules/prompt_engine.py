@@ -1,7 +1,7 @@
 """
-Cookie-Fooocus — 3-Mode Prompt Engine
+Cookie-Fooocus — 4-Mode Prompt Engine
 ────────────────────────────────────────────────────────────────────────────────
-Replaces the previous opaque expansion system with three explicit, selectable
+Replaces the previous opaque expansion system with four explicit, selectable
 modes.  Each call returns a PromptResult with the expanded prompt AND a full
 PromptTrace so users can see exactly what changed and why.
 
@@ -14,6 +14,10 @@ PromptTrace so users can see exactly what changed and why.
 
   Mode C — LLM       Optional Ollama / local LLM with constrained JSON output.
                      Falls back silently to BALANCED if LLM unavailable.
+
+  Mode D — STANDARD  Original Fooocus GPT-2 expansion engine.
+                     Loaded on first use.  Falls back to BALANCED if the
+                     GPT-2 model is unavailable.
 
 Architecture
 ────────────
@@ -50,6 +54,7 @@ class PromptMode(str, Enum):
     RAW      = "raw"       # Mode A — no modification
     BALANCED = "balanced"  # Mode B — deterministic structured expansion
     LLM      = "llm"       # Mode C — LLM-enhanced constrained JSON output
+    STANDARD = "standard"  # Mode D — original Fooocus GPT-2 expansion
 
 
 @dataclass
@@ -65,9 +70,15 @@ class PromptTrace:
 
     def display(self) -> str:
         """Return a human-readable trace string for the UI."""
+        _MODE_LABELS = {
+            PromptMode.RAW:      "RAW",
+            PromptMode.BALANCED: "BALANCED",
+            PromptMode.LLM:      "LLM",
+            PromptMode.STANDARD: "STANDARD (GPT-2)",
+        }
         lines = [
-            f"Requested: {self.mode.value.upper()}",
-            f"Executed:  {self.mode_used.value.upper()}",
+            f"Requested: {_MODE_LABELS.get(self.mode, self.mode.value.upper())}",
+            f"Executed:  {_MODE_LABELS.get(self.mode_used, self.mode_used.value.upper())}",
         ]
         if self.fallback_reason:
             lines.append(f"Fallback:  {self.fallback_reason}")
@@ -279,9 +290,66 @@ def _expand_llm(prompt: str, seed: int) -> PromptResult:
 
     # LLM unavailable — fall back to BALANCED with explicit reason
     result = _expand_balanced(prompt)
-    result.trace.mode           = PromptMode.LLM       # what was requested
-    result.trace.mode_used      = PromptMode.BALANCED   # what actually ran
+    result.trace.mode            = PromptMode.LLM       # what was requested
+    result.trace.mode_used       = PromptMode.BALANCED   # what actually ran
     result.trace.fallback_reason = "Ollama unavailable or returned invalid JSON — fell back to BALANCED."
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Mode D — STANDARD (original Fooocus GPT-2 expansion)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_gpt2_expansion = None  # lazy singleton — GPT-2 model loaded on first STANDARD call
+
+
+def _get_gpt2_expansion():
+    """Return the GPT-2 FooocusExpansion instance, loading it on first call."""
+    global _gpt2_expansion
+    if _gpt2_expansion is not None:
+        return _gpt2_expansion
+    try:
+        from extras.expansion import FooocusExpansion
+        _gpt2_expansion = FooocusExpansion()
+        log.info("[prompt_engine] GPT-2 expansion model loaded for STANDARD mode.")
+        return _gpt2_expansion
+    except Exception as exc:
+        log.warning("[prompt_engine] GPT-2 model unavailable (%s) — STANDARD will fall back to BALANCED.", exc)
+        return None
+
+
+def _expand_standard(prompt: str, seed: int) -> PromptResult:
+    """
+    Mode D — STANDARD: original Fooocus V2 GPT-2 expansion.
+    Falls back to BALANCED if the GPT-2 model is unavailable.
+    """
+    expansion = _get_gpt2_expansion()
+
+    if expansion is not None:
+        try:
+            expanded = expansion(prompt, seed)
+            if expanded and expanded.strip() and expanded.strip() != prompt.strip():
+                # Determine what was added
+                original_tokens = set(t.strip() for t in prompt.split(",") if t.strip())
+                expanded_tokens = set(t.strip() for t in expanded.split(",") if t.strip())
+                added = sorted(expanded_tokens - original_tokens)
+
+                trace = PromptTrace(
+                    mode=PromptMode.STANDARD,
+                    mode_used=PromptMode.STANDARD,
+                    original=prompt,
+                    added=added[:10],   # cap display to avoid overwhelming output
+                    notes=["Original Fooocus GPT-2 V2 expansion applied."],
+                )
+                return PromptResult(expanded=expanded, trace=trace)
+        except Exception as exc:
+            log.warning("[prompt_engine] GPT-2 expansion failed: %s — falling back to BALANCED.", exc)
+
+    # Fallback
+    result = _expand_balanced(prompt)
+    result.trace.mode            = PromptMode.STANDARD
+    result.trace.mode_used       = PromptMode.BALANCED
+    result.trace.fallback_reason = "GPT-2 model unavailable or failed — fell back to BALANCED."
     return result
 
 
@@ -325,6 +393,8 @@ class PromptEngine:
             return _expand_raw(prompt)
         elif mode == PromptMode.LLM:
             return _expand_llm(prompt, seed)
+        elif mode == PromptMode.STANDARD:
+            return _expand_standard(prompt, seed)
         else:
             return _expand_balanced(prompt)
 
@@ -335,6 +405,7 @@ class PromptEngine:
             "raw":      PromptMode.RAW,
             "balanced": PromptMode.BALANCED,
             "llm":      PromptMode.LLM,
+            "standard": PromptMode.STANDARD,
         }
         return mapping.get(s.lower().strip(), PromptMode.BALANCED)
 

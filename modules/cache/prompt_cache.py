@@ -22,6 +22,12 @@ Failure policy:
 Lifecycle: deterministic — same (prompt, seed, mode) → same expansion.
 No TTL needed: expansion output is stable for a given input tuple.
 
+Cache lifecycle hardening (v2.5+):
+  Size-based eviction  — L2 is pruned when row count exceeds soft/hard caps.
+  Age-based pruning    — entries older than max_age_days are removed.
+  Periodic compaction  — VACUUM runs after eviction to reclaim disk space.
+  Eviction metrics     — eviction_count tracked and exposed in stats().
+
 Default persist path:
   data/cache/prompt_cache.db  (created automatically if writable)
   Disable by passing persist_path=None to PromptCache().
@@ -42,7 +48,11 @@ from typing import Optional
 
 log = logging.getLogger("cookiefooocus.cache.prompt")
 
-_DEFAULT_MAXSIZE = 512   # L1 entry cap — prompts are small strings
+_DEFAULT_MAXSIZE     = 512    # L1 entry cap — prompts are small strings
+_L2_SOFT_CAP         = 5_000  # start evicting when L2 exceeds this row count
+_L2_HARD_CAP         = 10_000 # never exceed this; evict aggressively if reached
+_L2_MAX_AGE_DAYS     = 30     # prune entries older than this
+_L2_COMPACT_INTERVAL = 3600   # seconds between VACUUM runs
 
 
 def _default_persist_path() -> Optional[str]:
@@ -71,9 +81,12 @@ class PromptCache:
         self._store:  OrderedDict[str, str] = OrderedDict()
         self._max    = maxsize
         self._lock   = threading.Lock()
-        self._hits_l1  = 0
-        self._hits_l2  = 0
-        self._misses   = 0
+        self._hits_l1     = 0
+        self._hits_l2     = 0
+        self._misses      = 0
+        self._evictions   = 0
+        self._stale_count = 0
+        self._last_compact: float = time.time()
 
         # Resolve persist path
         if persist_path == "auto":
@@ -207,14 +220,76 @@ class PromptCache:
         with self._lock:
             total = self._hits_l1 + self._hits_l2 + self._misses
             return {
-                "hits_l1":   self._hits_l1,
-                "hits_l2":   self._hits_l2,
-                "misses":    self._misses,
-                "hit_rate":  round((self._hits_l1 + self._hits_l2) / total, 3) if total else 0.0,
-                "l1_size":   len(self._store),
-                "l1_capacity": self._max,
-                "l2_enabled":  self._db_path is not None,
+                "hits_l1":      self._hits_l1,
+                "hits_l2":      self._hits_l2,
+                "misses":       self._misses,
+                "hit_rate":     round((self._hits_l1 + self._hits_l2) / total, 3) if total else 0.0,
+                "evictions":    self._evictions,
+                "stale_pruned": self._stale_count,
+                "l1_size":      len(self._store),
+                "l1_capacity":  self._max,
+                "l2_enabled":   self._db_path is not None,
             }
+
+    def prune(self) -> int:
+        """
+        Remove stale L2 entries (age > max_age_days) and enforce size caps.
+        Returns number of rows removed.  Safe to call from background threads.
+        """
+        if not self._db_path:
+            return 0
+        removed = 0
+        try:
+            cutoff = time.time() - (_L2_MAX_AGE_DAYS * 86400)
+            with sqlite3.connect(self._db_path) as conn:
+                # Age-based pruning
+                cur = conn.execute(
+                    "DELETE FROM prompt_cache WHERE created_at < ?", (cutoff,)
+                )
+                removed += cur.rowcount
+
+                # Size-based eviction — remove oldest rows above soft cap
+                count = conn.execute("SELECT COUNT(*) FROM prompt_cache").fetchone()[0]
+                if count > _L2_SOFT_CAP:
+                    excess = count - _L2_SOFT_CAP
+                    cur = conn.execute(
+                        "DELETE FROM prompt_cache WHERE key IN "
+                        "(SELECT key FROM prompt_cache ORDER BY created_at ASC LIMIT ?)",
+                        (excess,),
+                    )
+                    removed += cur.rowcount
+
+                conn.commit()
+
+            if removed:
+                with self._lock:
+                    self._stale_count += removed
+                    self._evictions   += removed
+                log.debug("[prompt_cache] Pruned %d stale/excess L2 entries", removed)
+                self._compact_if_due()
+
+        except Exception as exc:
+            log.debug("[prompt_cache] Prune failed: %s", exc)
+        return removed
+
+    def _compact_if_due(self) -> None:
+        """Run VACUUM if the compaction interval has elapsed."""
+        if not self._db_path:
+            return
+        now = time.time()
+        if now - self._last_compact < _L2_COMPACT_INTERVAL:
+            return
+        self._last_compact = now
+
+        def _do_vacuum() -> None:
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute("VACUUM")
+                log.debug("[prompt_cache] L2 VACUUM complete")
+            except Exception as exc:
+                log.debug("[prompt_cache] VACUUM failed: %s", exc)
+
+        threading.Thread(target=_do_vacuum, daemon=True, name="prompt-cache-vacuum").start()
 
     def clear(self) -> None:
         with self._lock:

@@ -424,5 +424,82 @@ class VRAMGovernor:
         """Return current correction factor and sample count."""
         return _vram_feedback.stats()
 
+    # ── Calibration ───────────────────────────────────────────────────────────
+
+    def reset_vram_model(self) -> None:
+        """
+        Reset the VRAM feedback model to baseline (correction_factor = 1.0,
+        sample count = 0).  Use this to clear accumulated drift or after
+        switching hardware.
+        """
+        with _vram_feedback._lock:
+            _vram_feedback._factor  = 1.0
+            _vram_feedback._samples = 0
+        log.info("[resources] VRAM model reset to baseline.")
+
+    def calibrate(
+        self,
+        resolutions: Optional[list] = None,
+        step_counts: Optional[list] = None,
+    ) -> dict:
+        """
+        Run a benchmark sequence of synthetic VRAM estimates against known
+        fixed parameters to validate current model accuracy.
+
+        This is a DRY RUN — no actual GPU work is performed.  It compares
+        the predictive model output against the expected baseline coefficients
+        for a range of resolution / step combinations and reports how far the
+        model has drifted from its baseline.
+
+        Args:
+            resolutions: list of (width, height) tuples.  Defaults to standard ladder.
+            step_counts: list of step counts.  Defaults to standard step ladder.
+
+        Returns:
+            dict with per-combination predictions and a drift_pct summary.
+
+        Usage:
+            report = governor.calibrate()
+            if report["max_drift_pct"] > 20:
+                governor.reset_vram_model()
+        """
+        if resolutions is None:
+            resolutions = [(512, 512), (768, 768), (1024, 1024)]
+        if step_counts is None:
+            step_counts = [15, 20, 30]
+
+        factor   = _vram_feedback.factor
+        baseline = 1.0     # uncorrected model
+        results  = []
+
+        for (w, h) in resolutions:
+            for steps in step_counts:
+                params_test = GenParams(width=w, height=h, steps=steps)
+                est_current  = _estimate_vram_gb(params_test, correction_factor=factor)
+                est_baseline = _estimate_vram_gb(params_test, correction_factor=baseline)
+                drift_pct    = abs(est_current - est_baseline) / max(est_baseline, 0.001) * 100
+
+                results.append({
+                    "resolution":    f"{w}x{h}",
+                    "steps":         steps,
+                    "baseline_gb":   round(est_baseline, 3),
+                    "corrected_gb":  round(est_current, 3),
+                    "drift_pct":     round(drift_pct, 1),
+                })
+
+        max_drift = max(r["drift_pct"] for r in results) if results else 0.0
+        log.info(
+            "[resources] Calibration complete — max drift %.1f%% (factor=%.3f, samples=%d)",
+            max_drift, factor, _vram_feedback.samples,
+        )
+
+        return {
+            "correction_factor": round(factor, 4),
+            "samples":           _vram_feedback.samples,
+            "max_drift_pct":     round(max_drift, 1),
+            "combinations":      results,
+            "recommendation":    "reset" if max_drift > 25 else "ok",
+        }
+
 
 governor = VRAMGovernor()

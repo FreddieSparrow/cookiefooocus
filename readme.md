@@ -52,7 +52,7 @@ That's it for local use. The rest of this README covers hardware tuning, optiona
 | **Original Fooocus** | SDXL UI by lllyasviel. No queue, no safety, no API. Crashes on low VRAM. |
 | **Cookie-Fooocus v1** | Added Ollama/GPT-2 prompt expansion, 7-layer safety pipeline, basic caching, PBKDF2 auth, Apple Silicon (Mode 6). Modular structure but tightly coupled. |
 | **Cookie-Fooocus v2** | Full architecture redesign. 3-layer separation (core / orchestration / policy). 3-mode prompt engine with PromptTrace. 2-layer safety with clean interfaces. Priority queue replacing semaphore. Structured SafetyDecision output. |
-| **Cookie-Fooocus v2.5 (this)** | Stabilisation + safety hardening. Predictive VRAM model with EWA feedback correction. L1/L2 (memory + SQLite) cache hierarchy. Decision chain logging per job. Telemetry threshold monitoring with opt-in auto-tune. Per-user queue limits. Video frame cost cap. n8n disabled by default. |
+| **Cookie-Fooocus v2.5 (this)** | Stabilisation + safety hardening. Predictive VRAM model with EWA feedback correction. L1/L2 (memory + SQLite) cache hierarchy. Decision chain logging per job. Telemetry threshold monitoring with opt-in auto-tune. Per-user queue limits. Video frame cost cap. n8n disabled by default. STANDARD (GPT-2) prompt mode. Multi-GPU topology layer. Distributed worker protocol. Cache lifecycle hardening (size/age eviction + compaction). VRAM calibration tool. Safety Explainability UI. Server mode blocked on macOS. |
 
 ---
 
@@ -132,12 +132,13 @@ After each completed job, actual VRAM peak is compared to the prediction. The `p
 
 ### Smarter Prompting
 
-Three explicit modes — you choose, it doesn't guess:
+Four explicit modes — you choose, it doesn't guess:
 
 | Mode | What it does | Use when |
 |------|-------------|----------|
 | RAW | Passes your prompt unchanged | You know exactly what you want |
 | BALANCED | Deterministic keyword expansion (no LLM, fast) | Best default for most users |
+| STANDARD | Original Fooocus GPT-2 expansion engine | You want the classic Fooocus V2 behaviour |
 | LLM | Ollama rewrites your prompt creatively | You want more expressive results and have the hardware |
 
 Every result carries a full trace — including whether a fallback happened and why.
@@ -388,7 +389,7 @@ profiles/
 
 ---
 
-## 1. Prompt Engine (3 modes)
+## 1. Prompt Engine (4 modes)
 
 **File:** [modules/prompt_engine.py](modules/prompt_engine.py)
 
@@ -415,6 +416,19 @@ print(result.expanded)
 ### Mode C — LLM
 
 Ollama with constrained JSON output (`subject`, `style`, `lighting`, `composition`). Falls back to BALANCED if Ollama is unavailable — with an explicit reason recorded in the trace.
+
+### Mode D — STANDARD (GPT-2)
+
+Original Fooocus V2 GPT-2 expansion engine. Loaded on first use. Falls back to BALANCED if the GPT-2 model is unavailable. Use this when you want classic Fooocus expansion behaviour.
+
+```python
+result = engine.run("a cyberpunk city", seed=42, mode=PromptMode.STANDARD)
+# → original Fooocus GPT-2 expanded prompt
+print(result.trace.display())
+# Requested: STANDARD (GPT-2)
+# Executed:  STANDARD (GPT-2)
+# ...
+```
 
 ### Prompt Trace (no more silent fallbacks)
 
@@ -944,6 +958,148 @@ entry_with_update.py  [--server]
 | **Safe model loading** | Raw `torch.load()` | **Pickle allowlist** | Same | Same |
 | **Security manifest** | None | **SHA-256 boot verification of `content_filter.py`** | Same | Same |
 | **Auto-update** | None | **Background git pull, channel config** | Same | Same |
+
+---
+
+## v2.5 Engineering Improvements
+
+These modules were added in v2.5 as architectural upgrades rather than optional polish.
+
+### Multi-GPU Scheduling
+
+**File:** [modules/generation_controller/gpu_topology.py](modules/generation_controller/gpu_topology.py)
+
+Detects all CUDA / Metal devices at startup and maintains a per-GPU capacity model. The scheduler now routes jobs to the least-loaded GPU instead of stacking onto a single device.
+
+```python
+from modules.generation_controller.gpu_topology import gpu_topology
+
+device = gpu_topology.least_loaded()
+gpu_topology.mark_job_start(device.index, vram_required_gb=4.5)
+# ... generation runs on device.index ...
+gpu_topology.mark_job_done(device.index, actual_vram_gb=4.2, elapsed_s=11.0)
+
+print(gpu_topology.summary())
+# [{"index": 0, "name": "RTX 4090", "free_vram_gb": 18.4, "active_jobs": 0, ...},
+#  {"index": 1, "name": "RTX 3080", "free_vram_gb": 7.1,  "active_jobs": 1, ...}]
+```
+
+Target outcome: linear scaling across GPUs instead of queue stacking on one device.
+
+### Distributed Queue Mode
+
+**File:** [modules/generation_controller/worker_protocol.py](modules/generation_controller/worker_protocol.py)
+
+Splits the scheduler into a control plane (job assignment) and execution plane (worker nodes). Enables multi-machine rendering farm support.
+
+```python
+from modules.generation_controller.worker_protocol import control_plane, HttpWorkerNode
+
+control_plane.register_worker(HttpWorkerNode("http://render-node-2:7866"))
+control_plane.start()
+
+job_id = control_plane.submit("job-001", params={"prompt": "..."}, priority=0)
+result = control_plane.get_result(job_id)
+```
+
+Features: heartbeat monitoring, lease-based job ownership, automatic reclaim on worker timeout, HTTP transport for remote nodes.
+
+### Cache Lifecycle Hardening
+
+**File:** [modules/cache/prompt_cache.py](modules/cache/prompt_cache.py)
+
+Adds tiered eviction to the L2 SQLite prompt cache so disk usage stays predictable over long runtimes.
+
+| Policy | Detail |
+|--------|--------|
+| Soft cap | Evict oldest rows when L2 exceeds 5,000 entries |
+| Hard cap | Never exceed 10,000 rows |
+| Age pruning | Remove entries older than 30 days |
+| Compaction | VACUUM runs after eviction (async, max once per hour) |
+| Metrics | `evictions` and `stale_pruned` added to `stats()` |
+
+```python
+from modules.cache import prompt_cache
+report = prompt_cache.prune()   # returns count of removed entries
+stats  = prompt_cache.stats()
+# {"hits_l1": ..., "evictions": 42, "stale_pruned": 17, ...}
+```
+
+### VRAM Model Calibration Tool
+
+**File:** [modules/generation_controller/resource_manager.py](modules/generation_controller/resource_manager.py)
+
+The EWA feedback model can drift over time as hardware changes. Two new methods address this:
+
+```python
+from modules.generation_controller import governor
+
+# Run a benchmark sweep — no GPU work, pure model validation
+report = governor.calibrate()
+# {"max_drift_pct": 3.2, "recommendation": "ok", "combinations": [...]}
+
+# If drift > 25%:
+if report["recommendation"] == "reset":
+    governor.reset_vram_model()
+```
+
+`calibrate()` compares current model predictions against the uncorrected baseline across the full resolution/step ladder and reports drift per combination.
+
+### Safety Explainability
+
+**File:** [modules/safety/explainability.py](modules/safety/explainability.py)
+
+Formats the per-job `decision_chain` for display in the UI. Surfaces what every pipeline stage decided about the request and why.
+
+```python
+from modules.safety.explainability import (
+    format_decision_chain_text,
+    format_decision_chain_html,
+    format_safety_decision_html,
+)
+
+# Plain text for logs
+print(format_decision_chain_text(chain.to_dict()))
+# ── Decision Chain  (job: cf-abc123) ──
+#    1. 💾 VRAM Governor         reduce_steps          (predicted_vram_exceeds_budget)
+#          before: {"steps": 30}
+#          after:  {"steps": 20}
+#    2. ✅ Cost Validator         approve
+#    3. ⏳ Scheduler              acquire_slot
+
+# HTML for Gradio UI (gr.HTML component)
+html = format_decision_chain_html(chain.to_dict())
+```
+
+### Server Mode: macOS Restriction
+
+`--server` mode now exits immediately on Apple Silicon / macOS with a clear error message. Server mode requires a Linux host with a CUDA GPU. Local mode (`bash run.sh`) continues to work normally on Mac.
+
+---
+
+## v2.5 Engineering Roadmap (Next Phase)
+
+v2.5 is structurally solid but still a single-node, single-GPU-first system with partially self-tuning subsystems. The following areas are next-phase architectural targets:
+
+### 1. True Multi-GPU Scheduling *(foundation shipped)*
+
+The `GPUTopology` layer is in place. Next: extend `VRAMGovernor` to call `gpu_topology.device_for_job()` automatically and pass the selected device index into the generation pipeline.
+
+### 2. Optional Distributed Queue Mode *(foundation shipped)*
+
+The `ControlPlane` and `WorkerNode` protocol are in place. Next: wire `ControlPlane` into `webui.py` server startup and expose a `/cf/worker/execute` endpoint for remote nodes.
+
+### 3. Cache Invalidation & Lifecycle Hardening *(shipped)*
+
+Size-based eviction, age-based pruning, and compaction are now implemented. Next: expose cache metrics in the telemetry dashboard.
+
+### 4. VRAM Model Calibration Tool *(shipped)*
+
+`calibrate()` and `reset_vram_model()` are implemented. Next: add an optional periodic recalibration trigger in the telemetry monitor.
+
+### 5. Safety Explainability UI *(shipped)*
+
+Formatters are implemented. Next: wire `format_decision_chain_html()` into the Gradio UI as a collapsible "Generation Audit" panel on every result card.
 
 ---
 

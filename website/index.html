@@ -20,6 +20,7 @@
         <a href="#features">Features</a>
         <a href="#hardware">Hardware</a>
         <a href="#install">Install</a>
+        <a href="#docs">Docs</a>
         <a href="https://github.com/FreddieSparrow/cookiefooocus" target="_blank" class="btn-nav">GitHub →</a>
       </div>
     </div>
@@ -40,7 +41,7 @@
         <a href="https://github.com/FreddieSparrow/cookiefooocus" target="_blank" class="btn-ghost">View on GitHub</a>
       </div>
       <div class="hero-stats">
-        <div class="stat"><span class="stat-n">3</span><span class="stat-l">Prompt modes</span></div>
+        <div class="stat"><span class="stat-n">4</span><span class="stat-l">Prompt modes</span></div>
         <div class="stat"><span class="stat-n">2</span><span class="stat-l">Safety layers</span></div>
         <div class="stat"><span class="stat-n">6</span><span class="stat-l">Hardware modes</span></div>
         <div class="stat"><span class="stat-n">8</span><span class="stat-l">Motion presets</span></div>
@@ -124,7 +125,7 @@
           <a id="download-link" class="btn-ghost btn-sm" download="cookie-fooocus-generated.jpg">Download</a>
           <button onclick="generate()" class="btn-ghost btn-sm">Regenerate</button>
           <span class="demo-note">
-            Full Cookie-Fooocus has 3 prompt modes, VRAM governor, priority queue, and video output.
+            Full Cookie-Fooocus has 4 prompt modes (including STANDARD GPT-2), VRAM governor, multi-GPU routing, priority queue, and video output.
             <a href="#install">Install locally →</a>
           </span>
         </div>
@@ -160,8 +161,8 @@
 
         <div class="feature-card">
           <div class="feature-icon">🧠</div>
-          <h3>3 prompt modes</h3>
-          <p>RAW passes your prompt unchanged. BALANCED adds deterministic keyword expansion with no LLM. LLM uses Ollama for creative rewrites. Every result shows what mode actually ran.</p>
+          <h3>4 prompt modes</h3>
+          <p>RAW passes your prompt unchanged. BALANCED adds deterministic keyword expansion with no LLM. STANDARD uses the original Fooocus GPT-2 engine. LLM uses Ollama for creative rewrites. Every result shows what mode actually ran and why.</p>
         </div>
 
         <div class="feature-card">
@@ -192,6 +193,44 @@
           <div class="feature-icon">🎥</div>
           <h3>Video pipeline</h3>
           <p>Same UI, same safety, same queue — switch to video output in one click. 8 motion presets. Frame cost cap prevents one request from running 144 sequential inference passes.</p>
+        </div>
+
+        <div class="feature-card feature-card-new">
+          <div class="feature-new-badge">New in v2.5</div>
+          <div class="feature-icon">🖥</div>
+          <h3>Multi-GPU scheduling</h3>
+          <p>GPU topology layer detects all CUDA / Metal devices. Jobs route to the least-loaded GPU. Per-GPU free VRAM and throughput scores updated after every job — no more queue stacking on one device.</p>
+        </div>
+
+        <div class="feature-card feature-card-new">
+          <div class="feature-new-badge">New in v2.5</div>
+          <div class="feature-icon">🌐</div>
+          <h3>Distributed worker protocol</h3>
+          <p>Control plane / execution plane split. Register local or remote HTTP workers. Job lease system with automatic reclaim on timeout. Foundation for home lab → production rendering farm scaling.</p>
+        </div>
+
+        <div class="feature-card feature-card-new">
+          <div class="feature-new-badge">New in v2.5</div>
+          <div class="feature-icon">🗄</div>
+          <h3>Cache lifecycle hardening</h3>
+          <p>SQLite prompt cache no longer grows indefinitely. Size-based eviction (soft cap 5k / hard cap 10k rows), age-based pruning (30-day TTL), async VACUUM compaction, and eviction metrics in stats().</p>
+        </div>
+
+        <div class="feature-card feature-card-new">
+          <div class="feature-new-badge">New in v2.5</div>
+          <div class="feature-icon">🔬</div>
+          <h3>VRAM calibration tool</h3>
+          <p>The EWA feedback model can drift after hardware changes. calibrate() runs a benchmark sweep across all resolution/step combinations and reports drift percentage. reset_vram_model() returns it to baseline.</p>
+          <div class="feature-code">
+            <code>report = governor.calibrate() → {"max_drift_pct": 3.2}</code>
+          </div>
+        </div>
+
+        <div class="feature-card feature-card-new">
+          <div class="feature-new-badge">New in v2.5</div>
+          <div class="feature-icon">🔎</div>
+          <h3>Safety Explainability UI</h3>
+          <p>The decision_chain is now surfaced in the UI as a visual timeline. Every stage shows what it decided, what it changed, and why — VRAM adjustments, safety layer decisions, scheduler actions, all auditable in one panel.</p>
         </div>
 
       </div>
@@ -281,6 +320,10 @@ bash run.sh</code></pre>
       </div>
 
       <div class="tab-content" id="tab-server" style="display:none">
+        <div class="install-warning">
+          ⚠️ <strong>Server mode requires Linux + CUDA GPU.</strong>
+          Not supported on macOS / Apple Silicon. Use <code>bash run.sh</code> for local mode on Mac.
+        </div>
         <pre><code>bash install_server.sh
 cp auth.json.example auth.json
 # Edit auth.json — change the admin password
@@ -327,6 +370,94 @@ ollama serve</code></pre>
           <div class="error-title">Very slow on Apple Silicon</div>
           <div class="error-fix">You may be in CPU mode accidentally. Confirm Mode 6 is selected. Check startup logs for <code>mps</code>.</div>
         </div>
+        <div class="error-card">
+          <div class="error-title">--server flag on macOS exits immediately</div>
+          <div class="error-fix">Server mode is not supported on Apple Silicon. Use local mode: <code>bash run.sh</code>. Server mode requires a Linux host with a CUDA GPU.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── DOCS ────────────────────────────────────────────────────────────────── -->
+  <section class="section section-dark" id="docs">
+    <div class="container">
+      <h2>Documentation</h2>
+      <p class="section-sub">Everything you need to know — architecture, modules, configuration, and the v2.5 engineering improvements.</p>
+
+      <div class="docs-grid">
+
+        <div class="docs-card">
+          <h3>Architecture</h3>
+          <p>Three strict layers: Core (SDXL inference), Orchestration (scheduler, VRAM governor, cache, telemetry), and Policy (safety, rate limits, profiles). UI never calls pipelines directly.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#architecture" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>Prompt Engine (4 modes)</h3>
+          <p><strong>RAW</strong> — unchanged passthrough.<br><strong>BALANCED</strong> — deterministic keyword expansion, no LLM, always reproducible.<br><strong>STANDARD</strong> — original Fooocus GPT-2 engine.<br><strong>LLM</strong> — Ollama with constrained JSON output, falls back to BALANCED.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#1-prompt-engine-4-modes" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>VRAM Governor</h3>
+          <p>Pre-execution VRAM budget check with predictive model and EWA feedback correction. Auto-downscale cascade: steps → resolution → precision → reject. New: calibrate() detects model drift; reset_vram_model() restores baseline.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#vram-model-calibration-tool" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>2-Layer Safety</h3>
+          <p>Layer 1: fast deterministic rules (regex, keyword, fuzzy — always on, no ML). Layer 2: ML classifier (DeBERTa v3, runs only when Layer 1 passes). Image moderation post-generation only. Structured SafetyDecision output on every check.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#4-2-layer-safety-system" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>Scheduler &amp; Queue</h3>
+          <p>Priority queue with starvation prevention (low-priority jobs promoted after 30s). Per-user job limit (max 2 active). Job lifecycle: QUEUED → SCHEDULED → RUNNING → COMPLETE/FAILED/CANCELLED/TIMED_OUT.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#scheduler" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>Multi-GPU &amp; Distributed Queue</h3>
+          <p>GPUTopology layer detects all CUDA / Metal devices and routes jobs to the least-loaded device. ControlPlane / WorkerNode protocol enables multi-machine rendering with lease-based job ownership and heartbeat monitoring.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#multi-gpu-scheduling" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>Cache System</h3>
+          <p>L1 in-memory LRU + L2 SQLite. Separate caches for prompt expansions (no TTL) and NSFW scores (TTL 300s). New: size-based eviction (5k/10k row caps), age-based pruning (30 days), async VACUUM compaction, eviction metrics.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#cache-lifecycle-hardening" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>n8n Integration</h3>
+          <p>HMAC-SHA256 signed requests with replay protection (nonce + timestamp). Rate limiting (30 req/60s per IP). Disabled by default in safety_policy.json. Callbacks on: blocked, complete, queue_wait.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#6-n8n-integration-hmac-signed" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>Decision Chain &amp; Explainability</h3>
+          <p>Every job produces an ordered audit log of all parameter decisions. New: explainability module formats this as plain text, structured JSON, or an HTML timeline for the Gradio UI — what the system changed and why, fully visible.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#safety-explainability" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>Policy Profiles</h3>
+          <p>Four profiles: <strong>balanced</strong> (default), <strong>creative</strong> (minimal filtering, LLM), <strong>strict</strong> (max moderation, public deploy), <strong>api_safe</strong> (programmatic / n8n). Copy values into safety_policy.json to apply — never auto-applied.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#5-policy-profiles" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>Video Pipeline</h3>
+          <p>Same UI, queue, and safety as image generation. Backends: SVD (img2vid) and AnimateDiff. 8 motion presets: smooth, cinematic, handheld, zoom, orbit, parallax, dolly, drone. Frame cost cap: max 96 frames per job.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md#7-video-generation" target="_blank" class="docs-link">Read more →</a>
+        </div>
+
+        <div class="docs-card">
+          <h3>Full Readme</h3>
+          <p>Complete documentation including all command-line flags, hardware modes, Apple Silicon guide, n8n signing examples, telemetry dashboard output, and full version comparison table.</p>
+          <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md" target="_blank" class="docs-link docs-link-primary">Open full readme →</a>
+        </div>
+
       </div>
     </div>
   </section>

@@ -25,6 +25,23 @@ from modules.ui_gradio_extensions import reload_javascript
 # imported so the system is identical to upstream Fooocus.
 _server_mode = args_manager.args.server
 if _server_mode:
+    # Server mode is not supported on Apple Silicon / macOS.
+    # Multi-user authentication relies on PBKDF2 session handling and a
+    # persistent listener — neither is stable on MPS and unified-memory
+    # hardware.  Use local mode instead.
+    try:
+        from modules.generation_controller.resource_manager import get_hardware_profile as _hwp
+        if _hwp().is_apple_silicon:
+            import sys
+            print(
+                "\n[Cookie-Fooocus] ERROR: --server mode is not supported on Apple Silicon / macOS.\n"
+                "  Use local mode instead:  bash run.sh\n"
+                "  Server mode requires a Linux host with a CUDA GPU.\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    except Exception:
+        pass
     from modules.auth import auth_enabled, check_auth
 else:
     auth_enabled = False
