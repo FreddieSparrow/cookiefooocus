@@ -96,35 +96,71 @@ Cookie-Fooocus
 
 ## Installation
 
-### 1. Prerequisites
+> **Style presets** (Realistic, Anime, etc.) are selected inside the web UI — not via separate scripts.
+
+### Prerequisites
 
 - Python 3.10+
 - Git
-- An NVIDIA/AMD GPU with 4 GB+ VRAM, **or** an Apple Silicon Mac with 32 GB+ unified memory, **or** 16 GB+ system RAM for no-VRAM mode
+- NVIDIA/AMD GPU 4 GB+ VRAM, **or** Apple Silicon Mac 32 GB+ unified memory, **or** 16 GB+ system RAM
 
-### 2. Clone and install
+---
 
+### Option A — Local Mode (personal use, no login)
+
+**macOS / Linux:**
 ```bash
 git clone https://github.com/FreddieSparrow/cookiefooocus.git
 cd cookiefooocus
-
-# Option A — Conda (recommended)
-conda env create -f environment.yaml
-conda activate fooocus
-pip install -r requirements_versions.txt
-
-# Option B — Python venv
-python3 -m venv fooocus_env
-source fooocus_env/bin/activate   # Windows: fooocus_env\Scripts\activate
-pip install -r requirements_versions.txt
+bash install_local.sh
+bash run.sh
 ```
 
-Optional extras (enables faster fuzzy matching, ML classifiers, and NSFW image filter):
+**Windows:**
+```
+1. Clone or download the repo
+2. Double-click install_local.bat
+3. Double-click run_local.bat
+```
+
+---
+
+### Option B — Server Mode (multi-user, with login)
+
+**macOS / Linux:**
 ```bash
-pip install rapidfuzz transformers pillow psutil
+git clone https://github.com/FreddieSparrow/cookiefooocus.git
+cd cookiefooocus
+bash install_server.sh
+# Edit auth.json — change the default admin password
+bash run_server.sh
 ```
 
-### 3. Ollama (optional — for Gemma 4 prompt expansion)
+**Windows:**
+```
+1. Clone or download the repo
+2. Double-click install_server.bat
+3. Edit auth.json — change the default admin password
+4. Double-click run_server.bat
+```
+
+The install scripts create a Python virtual environment, install all dependencies, and set up credentials automatically.
+
+---
+
+### Run scripts summary
+
+| Script | Platform | What it does |
+|--------|----------|-------------|
+| `run.sh` | Mac/Linux | Local mode |
+| `run.sh --server --listen` | Mac/Linux | Server mode (manual) |
+| `run_server.sh` | Mac/Linux | Server mode (dedicated script) |
+| `run_local.bat` | Windows | Local mode |
+| `run_server.bat` | Windows | Server mode |
+
+---
+
+### Optional: Ollama (for Gemma 4 prompt expansion)
 
 Ollama is only used if your hardware meets minimum requirements:
 - **Apple Silicon Mac** — 32 GB+ unified memory
@@ -146,13 +182,9 @@ Override host or model:
 OLLAMA_HOST=http://192.168.1.10:11434 OLLAMA_MODEL=gemma4 python entry_with_update.py
 ```
 
-### 4. First launch
+### First launch
 
-```bash
-python entry_with_update.py
-```
-
-A setup wizard runs once, asking you to choose a hardware mode. Your answer is saved and never asked again. To re-run, delete `~/.config/cookiefooocus/first_run.json`.
+A setup wizard runs once, asking you to choose a hardware mode (1–6). Your answer is saved. To re-run the wizard, delete `~/.config/cookiefooocus/first_run.json`.
 
 ---
 
