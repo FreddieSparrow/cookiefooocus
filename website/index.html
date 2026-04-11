@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cookie-Fooocus — AI Image Generation</title>
+  <meta name="description" content="Cookie-Fooocus v2.5 — A security-hardened, performance-optimised AI image generator. Runs on low-end hardware. Scales to Apple Silicon." />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+
+  <!-- ── NAV ─────────────────────────────────────────────────────────────── -->
+  <nav>
+    <div class="nav-inner">
+      <span class="nav-logo">🍪 Cookie-Fooocus</span>
+      <div class="nav-links">
+        <a href="#demo">Try it</a>
+        <a href="#features">Features</a>
+        <a href="#hardware">Hardware</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/FreddieSparrow/cookiefooocus" target="_blank" class="btn-nav">GitHub →</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── HERO ────────────────────────────────────────────────────────────── -->
+  <section class="hero">
+    <div class="hero-inner">
+      <div class="badge">v2.5 — Stability + Safety Hardening</div>
+      <h1>AI images that<br /><span class="accent">actually work</span></h1>
+      <p class="hero-sub">
+        A security-hardened fork of Fooocus that runs on weak hardware,
+        won't crash on low VRAM, and tells you exactly what it did.
+        Scales from 16 GB RAM laptops to Apple Silicon M4.
+      </p>
+      <div class="hero-cta">
+        <a href="#demo" class="btn-primary">Try in browser</a>
+        <a href="https://github.com/FreddieSparrow/cookiefooocus" target="_blank" class="btn-ghost">View on GitHub</a>
+      </div>
+      <div class="hero-stats">
+        <div class="stat"><span class="stat-n">3</span><span class="stat-l">Prompt modes</span></div>
+        <div class="stat"><span class="stat-n">2</span><span class="stat-l">Safety layers</span></div>
+        <div class="stat"><span class="stat-n">6</span><span class="stat-l">Hardware modes</span></div>
+        <div class="stat"><span class="stat-n">8</span><span class="stat-l">Motion presets</span></div>
+      </div>
+    </div>
+    <div class="hero-glow"></div>
+  </section>
+
+  <!-- ── DEMO ────────────────────────────────────────────────────────────── -->
+  <section class="section" id="demo">
+    <div class="container">
+      <h2>Generate an image <span class="accent">right now</span></h2>
+      <p class="section-sub">
+        Free. No account. No API key. Powered by
+        <a href="https://pollinations.ai" target="_blank">Pollinations.ai</a>
+        with NSFW filtering enforced — the same safety principle as Cookie-Fooocus.
+        For the full experience, <a href="#install">install locally</a>.
+      </p>
+
+      <div class="demo-box">
+        <div class="demo-input-row">
+          <input
+            type="text"
+            id="prompt-input"
+            placeholder="a cyberpunk city at night, neon reflections, cinematic..."
+            maxlength="500"
+            autocomplete="off"
+          />
+          <button id="generate-btn" class="btn-primary" onclick="generate()">Generate</button>
+        </div>
+
+        <div class="demo-options">
+          <label class="option-label">
+            Style
+            <select id="style-select">
+              <option value="">None</option>
+              <option value="cinematic, dramatic lighting, 8K">Cinematic</option>
+              <option value="anime style, vibrant colors, detailed">Anime</option>
+              <option value="oil painting, classical, brushstrokes">Oil Painting</option>
+              <option value="pixel art, 16-bit, retro game">Pixel Art</option>
+              <option value="watercolor, soft edges, pastel">Watercolour</option>
+              <option value="photorealistic, DSLR, bokeh, sharp">Photorealistic</option>
+              <option value="dark fantasy, gothic, moody">Dark Fantasy</option>
+              <option value="minimalist, flat design, clean">Minimalist</option>
+            </select>
+          </label>
+          <label class="option-label">
+            Size
+            <select id="size-select">
+              <option value="512x512">512 × 512</option>
+              <option value="768x512">768 × 512</option>
+              <option value="512x768">512 × 768</option>
+              <option value="768x768" selected>768 × 768</option>
+            </select>
+          </label>
+          <label class="option-label toggle-label">
+            Safe mode
+            <input type="checkbox" id="safe-toggle" checked />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
+        </div>
+
+        <div class="demo-output" id="demo-output">
+          <div class="demo-placeholder" id="demo-placeholder">
+            <div class="placeholder-icon">🎨</div>
+            <p>Your image will appear here</p>
+            <p class="placeholder-sub">Type a prompt above and hit Generate</p>
+          </div>
+          <div class="demo-loading" id="demo-loading" style="display:none">
+            <div class="spinner"></div>
+            <p id="loading-text">Generating…</p>
+          </div>
+          <img id="demo-image" style="display:none" alt="Generated image" />
+          <div class="demo-error" id="demo-error" style="display:none">
+            <p id="error-text"></p>
+            <button onclick="generate()" class="btn-ghost btn-sm">Try again</button>
+          </div>
+        </div>
+
+        <div class="demo-actions" id="demo-actions" style="display:none">
+          <a id="download-link" class="btn-ghost btn-sm" download="cookie-fooocus-generated.jpg">Download</a>
+          <button onclick="generate()" class="btn-ghost btn-sm">Regenerate</button>
+          <span class="demo-note">
+            Full Cookie-Fooocus has 3 prompt modes, VRAM governor, priority queue, and video output.
+            <a href="#install">Install locally →</a>
+          </span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FEATURES ─────────────────────────────────────────────────────────── -->
+  <section class="section section-dark" id="features">
+    <div class="container">
+      <h2>Built different</h2>
+      <p class="section-sub">Not more features — better architecture.</p>
+
+      <div class="features-grid">
+
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <h3>Won't crash on low VRAM</h3>
+          <p>Predictive VRAM model estimates memory before a job starts. If budget is tight, it auto-scales: steps first, then resolution, then precision. You get a result, not an OOM error.</p>
+          <div class="feature-code">
+            <code>estimated = 3.5GB + (megapixels × cost) + (steps × cost)</code>
+          </div>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">🔍</div>
+          <h3>No silent changes</h3>
+          <p>Every job has a decision chain — an audit log of what each stage decided about your parameters. No more "something silently reduced my steps."</p>
+          <div class="feature-code">
+            <code>{"stage": "vram_model", "action": "reduce_steps", "reason": "predicted_vram_high"}</code>
+          </div>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">🧠</div>
+          <h3>3 prompt modes</h3>
+          <p>RAW passes your prompt unchanged. BALANCED adds deterministic keyword expansion with no LLM. LLM uses Ollama for creative rewrites. Every result shows what mode actually ran.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">🛡️</div>
+          <h3>2-layer safety</h3>
+          <p>Layer 1 is fast deterministic rules — no ML, always active. Layer 2 is an ML classifier that only runs when Layer 1 passes. Image moderation is post-generation only — no wasted GPU cycles.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">📊</div>
+          <h3>Real performance data</h3>
+          <p>p50 and p95 per stage, VRAM peak tracking. The VRAM prediction model learns from actual usage using EWA smoothing — gets more accurate over time without oscillating.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">🔌</div>
+          <h3>Safe by default</h3>
+          <p>n8n webhooks are disabled by default. Auto-tune is opt-in. Telemetry collects data but never modifies behaviour unless explicitly enabled. Everything sensitive requires a deliberate config change.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">💾</div>
+          <h3>L1/L2 cache hierarchy</h3>
+          <p>In-memory LRU for speed, SQLite for persistence. Cold starts warm from disk automatically. Cache failures are non-fatal — a write error never fails a generation job.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">🎥</div>
+          <h3>Video pipeline</h3>
+          <p>Same UI, same safety, same queue — switch to video output in one click. 8 motion presets. Frame cost cap prevents one request from running 144 sequential inference passes.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ── HARDWARE ──────────────────────────────────────────────────────────── -->
+  <section class="section" id="hardware">
+    <div class="container">
+      <h2>Runs on your hardware</h2>
+      <p class="section-sub">Pick the row that matches your machine.</p>
+
+      <div class="hw-table-wrap">
+        <table class="hw-table">
+          <thead>
+            <tr>
+              <th>Hardware</th>
+              <th>Mode</th>
+              <th>Speed</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="hw-min">
+              <td>16 GB RAM, no GPU</td>
+              <td><span class="mode-badge">5 — No VRAM</span></td>
+              <td>~10–20 min/image</td>
+              <td>Minimum viable. Works.</td>
+            </tr>
+            <tr>
+              <td>4–8 GB VRAM GPU</td>
+              <td><span class="mode-badge">1 or 2</span></td>
+              <td>~30–90 s/image</td>
+              <td>Recommended minimum for regular use</td>
+            </tr>
+            <tr class="hw-good">
+              <td>Apple Silicon 32 GB+</td>
+              <td><span class="mode-badge mode-apple">6 — MPS</span></td>
+              <td>~40–90 s/image</td>
+              <td>No VRAM ceiling — unified memory handles large jobs</td>
+            </tr>
+            <tr>
+              <td>12 GB+ VRAM GPU</td>
+              <td><span class="mode-badge mode-fast">1 — GPU</span></td>
+              <td>~10–30 s/image</td>
+              <td>Full feature set including LLM mode + stable video</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="apple-note">
+        <div class="apple-icon">🍏</div>
+        <div>
+          <strong>Apple Silicon tip:</strong> Select Mode 6 on first run. Unified memory means large jobs that would OOM a same-spec NVIDIA card will complete. LLM mode needs Ollama. Best results with 32 GB+ but 16 GB works with BALANCED mode.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── INSTALL ───────────────────────────────────────────────────────────── -->
+  <section class="section section-dark" id="install">
+    <div class="container">
+      <h2>Install in 3 commands</h2>
+
+      <div class="install-tabs">
+        <button class="tab-btn active" onclick="showTab('mac')">macOS / Linux</button>
+        <button class="tab-btn" onclick="showTab('win')">Windows</button>
+        <button class="tab-btn" onclick="showTab('server')">Server mode</button>
+      </div>
+
+      <div class="tab-content" id="tab-mac">
+        <pre><code>git clone https://github.com/FreddieSparrow/cookiefooocus.git
+cd cookiefooocus
+bash install_local.sh
+bash run.sh</code></pre>
+        <p class="install-then">Then open <strong>http://localhost:7865</strong></p>
+      </div>
+
+      <div class="tab-content" id="tab-win" style="display:none">
+        <ol class="install-steps">
+          <li>Download the repo as ZIP from GitHub</li>
+          <li>Extract and double-click <code>install_local.bat</code></li>
+          <li>Double-click <code>run_local.bat</code></li>
+          <li>Open <strong>http://localhost:7865</strong></li>
+        </ol>
+      </div>
+
+      <div class="tab-content" id="tab-server" style="display:none">
+        <pre><code>bash install_server.sh
+cp auth.json.example auth.json
+# Edit auth.json — change the admin password
+bash run_server.sh</code></pre>
+        <p class="install-note">Default credentials: <code>admin / changeme123</code> — change before exposing to any network.</p>
+      </div>
+
+      <div class="install-optional">
+        <h3>Optional: LLM prompt mode</h3>
+        <p>Install Ollama for Mode C (creative prompt rewriting). Falls back to BALANCED automatically if not installed.</p>
+        <pre><code>curl -fsSL https://ollama.com/install.sh | sh
+ollama pull gemma4
+ollama serve</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── ERRORS ────────────────────────────────────────────────────────────── -->
+  <section class="section" id="errors">
+    <div class="container">
+      <h2>Common errors, solved</h2>
+      <div class="errors-grid">
+        <div class="error-card">
+          <div class="error-title">CUDA out of memory</div>
+          <div class="error-fix">The VRAM governor should prevent this. If it happens, select a lower hardware mode or reduce resolution to 512–768.</div>
+        </div>
+        <div class="error-card">
+          <div class="error-title">Ollama unavailable</div>
+          <div class="error-fix">Run <code>ollama serve</code>, or switch to BALANCED mode. The trace will always say which mode actually ran.</div>
+        </div>
+        <div class="error-card">
+          <div class="error-title">Job timed out</div>
+          <div class="error-fix">Generation exceeded 600s. Reduce resolution or steps. Check VRAM with <code>telemetry.dashboard()</code>.</div>
+        </div>
+        <div class="error-card">
+          <div class="error-title">Invalid HMAC signature</div>
+          <div class="error-fix">Secret mismatch between <code>safety_policy.json</code> and the n8n Code node. They must be identical.</div>
+        </div>
+        <div class="error-card">
+          <div class="error-title">Output hidden / blank</div>
+          <div class="error-fix">NSFW score above block threshold. Lower <code>nsfw_block_threshold</code> in <code>safety_policy.json</code> if the content is legitimate.</div>
+        </div>
+        <div class="error-card">
+          <div class="error-title">Very slow on Apple Silicon</div>
+          <div class="error-fix">You may be in CPU mode accidentally. Confirm Mode 6 is selected. Check startup logs for <code>mps</code>.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FOOTER ─────────────────────────────────────────────────────────────── -->
+  <footer>
+    <div class="footer-inner">
+      <div class="footer-left">
+        <span class="footer-logo">🍪 Cookie-Fooocus v2.5</span>
+        <span class="footer-by">by <a href="https://github.com/FreddieSparrow" target="_blank">CookieHostUK</a></span>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/FreddieSparrow/cookiefooocus" target="_blank">GitHub</a>
+        <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md" target="_blank">Docs</a>
+        <a href="https://github.com/lllyasviel/Fooocus" target="_blank">Upstream Fooocus</a>
+        <a href="https://github.com/FreddieSparrow/cookiefooocus/issues" target="_blank">Issues</a>
+      </div>
+      <div class="footer-right">
+        <span class="footer-license">GPL-3.0 · Coded with Claude AI assistance</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- TensorFlow.js + NSFWJS for in-browser image safety classification -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/nsfwjs@2.4.2/dist/nsfwjs.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

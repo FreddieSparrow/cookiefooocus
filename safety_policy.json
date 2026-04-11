@@ -1,6 +1,6 @@
 {
   "_comment": "Cookie-Fooocus safety policy — edit thresholds here, no code changes needed.",
-  "_version": "1.1.0",
+  "_version": "2.5.0",
 
   "update_channel": "stable",
 
@@ -21,6 +21,23 @@
     "nsfw_warn_threshold": 0.35,
     "age_check_enabled": true,
     "age_check_min_age_score": 0.70
+  },
+
+  "n8n": {
+    "_comment": "n8n is disabled by default. Set enabled=true and configure secret before exposing any endpoints.",
+    "enabled": false,
+    "secret": "",
+    "callback_url": "",
+    "simple_token_mode": false,
+    "max_payload_bytes": 65536,
+    "rate_limit_rpm": 30,
+    "max_pixels": 1048576,
+    "max_steps_api": 60
+  },
+
+  "telemetry": {
+    "_comment": "auto_tune=false means telemetry records and alerts but never modifies runtime behaviour. Set true to allow suggested step reductions when p95 exceeds thresholds.",
+    "auto_tune": false
   },
 
   "debug_trace": false

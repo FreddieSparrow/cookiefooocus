@@ -52,7 +52,7 @@ That's it for local use. The rest of this README covers hardware tuning, optiona
 | **Original Fooocus** | SDXL UI by lllyasviel. No queue, no safety, no API. Crashes on low VRAM. |
 | **Cookie-Fooocus v1** | Added Ollama/GPT-2 prompt expansion, 7-layer safety pipeline, basic caching, PBKDF2 auth, Apple Silicon (Mode 6). Modular structure but tightly coupled. |
 | **Cookie-Fooocus v2** | Full architecture redesign. 3-layer separation (core / orchestration / policy). 3-mode prompt engine with PromptTrace. 2-layer safety with clean interfaces. Priority queue replacing semaphore. Structured SafetyDecision output. |
-| **Cookie-Fooocus v2.5 (this)** | Adds: VRAM governor with predictive downscaling. p50/p95 telemetry. HMAC-signed n8n integration with replay protection. Video pipeline (SVD + AnimateDiff + 8 motion presets). Policy profiles. Separate prompt/NSFW caches with independent lifecycles. |
+| **Cookie-Fooocus v2.5 (this)** | Stabilisation + safety hardening. Predictive VRAM model with EWA feedback correction. L1/L2 (memory + SQLite) cache hierarchy. Decision chain logging per job. Telemetry threshold monitoring with opt-in auto-tune. Per-user queue limits. Video frame cost cap. n8n disabled by default. |
 
 ---
 
@@ -67,6 +67,64 @@ Cookie-Fooocus fixes those things structurally — not with config flags, but wi
 - **No GPU overload** — priority queue with timeout and starvation prevention
 - **Measurable performance** — p50/p95 latency per stage, not just averages
 - **Automatable** — HMAC-signed n8n integration that's actually safe to expose
+
+---
+
+## v2.5 Stabilisation Changes
+
+This release is a stability and control update, not a feature expansion. The goal: fewer hidden interactions, safer defaults, and traceable decisions.
+
+### n8n disabled by default
+
+`n8n.enabled` is now `false` in `safety_policy.json`. Webhook routes do not register, no HMAC signing overhead runs, and no callback threads start unless you explicitly enable it. Startup logs: `n8n integration disabled (safe mode)`.
+
+### Auto-tune is opt-in
+
+Telemetry collects data and fires threshold alerts by default. It does **not** modify runtime behaviour unless `safety_policy.json` explicitly sets `"telemetry": {"auto_tune": true}`. The principle: *predictive systems may suggest. Only validators may enforce.*
+
+### Decision chain logging
+
+Every generation job now produces a `decision_chain` — an ordered audit log of what each pipeline stage decided about the parameters:
+
+```json
+"decision_chain": [
+  {"stage": "vram_model",      "action": "reduce_steps",  "reason": "predicted_vram_exceeds_budget",
+   "original": {"steps": 30},  "final": {"steps": 20}},
+  {"stage": "cost_validator",  "action": "approve",       "reason": "within_budget"},
+  {"stage": "scheduler",       "action": "acquire_slot",  "reason": "priority=0 user=alice"}
+]
+```
+
+This is returned in the n8n response and available for logging. No more "something silently changed my steps."
+
+### L1 / L2 cache hierarchy
+
+Both caches (prompt + NSFW) now have a two-tier structure:
+
+| Tier | Type | Speed | Survives restart |
+|------|------|-------|-----------------|
+| L1 | In-memory LRU | Microseconds | No |
+| L2 | SQLite on disk | Milliseconds | Yes |
+
+L2 writes are async (daemon thread) and failures are non-fatal. Cold starts warm L1 from L2 automatically. Location: `data/cache/`.
+
+### Predictive VRAM model with feedback correction
+
+VRAM estimation now uses:
+
+```
+estimated = BASE_MODEL (3.5 GB) + (megapixels × pixel_cost) + (steps × step_cost)
+```
+
+After each completed job, actual VRAM peak is compared to the prediction. The `pixel_cost` coefficient is slowly corrected using EWA smoothing (α=0.1, clamped to ±2× baseline). The model gets more accurate over time without oscillating.
+
+### Per-user queue limits
+
+`MAX_ACTIVE_JOBS_PER_USER = 2` — a single user cannot hold more than 2 active queue slots simultaneously. `submit()` raises `TooManyJobsError` immediately (HTTP 429 equivalent). Prevents one user saturating the GPU lane.
+
+### Video frame cost cap
+
+`MAX_TOTAL_FRAMES = 96` — video jobs with `duration_s × fps > 96` have duration clamped before the job reaches the queue. Result is recorded in `job.metadata["frame_cap"]` so callers know if clamping occurred.
 
 ---
 

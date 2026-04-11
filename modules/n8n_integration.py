@@ -542,7 +542,10 @@ def register_routes(app) -> None:
         register_routes(app)
     """
     if not _is_enabled():
-        log.info("[n8n] Disabled — routes not registered.")
+        log.info(
+            "[n8n] n8n integration disabled (safe mode). "
+            "Set n8n.enabled=true in safety_policy.json to activate webhooks."
+        )
         return
 
     try:
