@@ -1,66 +1,45 @@
 """
-Cookie-Fooocus — n8n Integration
+Cookie-Fooocus — n8n Integration (hardened)
 ────────────────────────────────────────────────────────────────────────────────
-Connects Cookie-Fooocus to n8n workflows (cloud or self-hosted) via:
+Connects Cookie-Fooocus to n8n workflows via signed webhooks.
 
-  • Webhook receiver — n8n sends a generation request → CF generates → returns image
-  • Webhook sender   — CF notifies n8n when a job completes (callback URL)
-  • Event hooks      — safety decisions, queue events forwarded to n8n flows
-
-Works in both LOCAL and SERVER mode:
-
-  Local mode:   webhook server runs on localhost (loopback only by default)
-  Server mode:  webhook server binds to the listen address, auth token required
-
-Quick setup:
+Security model
 ─────────────────────────────────────────────────────────────────────────────
-  1. Add to safety_policy.json:
-     {
-       "n8n": {
-         "enabled": true,
-         "token":   "your-secret-webhook-token",
-         "callback_url": "https://your-n8n-cloud.app.n8n.cloud/webhook/cookiefooocus"
-       }
-     }
+  HMAC-SHA256 signature   — every request signed with a shared secret
+                            (not a static token comparison — replay-safe)
+  Timestamp validation    — requests older than ±300s are rejected
+  Nonce store             — each nonce accepted exactly once (replay protection)
+  Payload size cap        — 64KB max body (prevents memory exhaustion)
+  Schema validation       — strict field whitelist (prevents injection via JSON)
+  Per-origin rate limit   — 30 requests / 60s per source IP
 
-  2. Start Cookie-Fooocus normally (local or server mode).
+Signing protocol (n8n → CF)
+─────────────────────────────────────────────────────────────────────────────
+  1. Build JSON body.
+  2. Compute: signature = HMAC-SHA256(key=secret, msg=f"{timestamp}:{nonce}:{body}")
+  3. Send headers:
+       X-CF-Timestamp:  <unix epoch int>
+       X-CF-Nonce:      <random 16-byte hex>
+       X-CF-Signature:  <hex digest>
 
-  3. In n8n, create a Webhook trigger node with:
-       Method: POST
-       Path:   /cookiefooocus
-       Auth:   Header — X-CF-Token: <your token>
+  In n8n: use the "Code" node to sign, or the HTTP Request node with
+  expression-based headers.  See readme.md for full n8n template.
 
-  4. From n8n, POST to:
-       http://localhost:7865/cf/webhook/generate
-     (server mode: http://your-host:7865/cf/webhook/generate)
+  For simple local setups where signing is too complex, fall back to
+  setting `"simple_token_mode": true` in the n8n config block — this
+  reverts to static-token auth (less secure, never use on public servers).
 
-  5. The response contains the generated image as base64 or a file path,
-     and the prompt trace, safety decision, and telemetry stats.
-
-Webhook payload schema (n8n → CF):
+Config (safety_policy.json)
 ─────────────────────────────────────────────────────────────────────────────
   {
-    "prompt":          "a cyberpunk city at night",
-    "negative_prompt": "",
-    "seed":            12345,         // optional — random if omitted
-    "steps":           30,            // optional
-    "cfg":             7.0,           // optional
-    "prompt_mode":     "balanced",    // "raw" | "balanced" | "llm"
-    "style":           "Cinematic",   // optional Fooocus style name
-    "callback_url":    "https://...", // optional — override per-request
-    "job_id":          "my-job-42"    // optional — echoed back in response
-  }
-
-Response payload (CF → n8n):
-─────────────────────────────────────────────────────────────────────────────
-  {
-    "job_id":        "my-job-42",
-    "status":        "complete" | "blocked" | "error",
-    "image_base64":  "...",           // only if status=complete
-    "image_path":    "/abs/path/…",   // local path (local mode only)
-    "prompt_trace":  { ... },         // PromptTrace fields
-    "safety":        { ... },         // SafetyDecision fields
-    "telemetry":     { ... }          // timing stats
+    "n8n": {
+      "enabled":           true,
+      "secret":            "your-32-char-or-longer-secret",
+      "callback_url":      "https://your.n8n.cloud/webhook/cookiefooocus",
+      "simple_token_mode": false,
+      "max_payload_bytes": 65536,
+      "rate_limit_rpm":    30
+    }
   }
 
 Provided by CookieHostUK — coded with Claude AI assistance.
@@ -70,6 +49,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -77,11 +57,18 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from collections import defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional, Tuple
 
 log = logging.getLogger("cookiefooocus.n8n")
+
+_MAX_PAYLOAD_BYTES_DEFAULT = 65_536  # 64 KB
+_TIMESTAMP_TOLERANCE_S     = 300     # ±5 minutes
+_NONCE_TTL_S               = 600     # keep nonces for 10 minutes
+_RATE_WINDOW_S             = 60
+_RATE_LIMIT_DEFAULT        = 30      # requests per window
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -97,72 +84,192 @@ def _load_n8n_config() -> dict:
         return {}
 
 
+def _cfg(key: str, default=None):
+    return _load_n8n_config().get(key, default)
+
+
 def _is_enabled() -> bool:
-    return bool(_load_n8n_config().get("enabled", False))
+    return bool(_cfg("enabled", False))
 
 
-def _get_token() -> str:
-    return str(_load_n8n_config().get("token", ""))
+def _get_secret() -> str:
+    return str(_cfg("secret", _cfg("token", "")))  # "token" is legacy alias
 
 
 def _get_callback_url() -> str:
-    return str(_load_n8n_config().get("callback_url", ""))
+    return str(_cfg("callback_url", ""))
+
+
+def _simple_token_mode() -> bool:
+    return bool(_cfg("simple_token_mode", False))
+
+
+def _max_payload() -> int:
+    return int(_cfg("max_payload_bytes", _MAX_PAYLOAD_BYTES_DEFAULT))
+
+
+def _rate_limit_rpm() -> int:
+    return int(_cfg("rate_limit_rpm", _RATE_LIMIT_DEFAULT))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Token validation
+#  Nonce store (replay prevention)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def validate_token(provided: str) -> bool:
-    """Constant-time token comparison to prevent timing attacks."""
-    import hmac
-    expected = _get_token()
-    if not expected:
-        log.warning("[n8n] No token configured — all requests will be rejected.")
-        return False
-    return hmac.compare_digest(
-        hashlib.sha256(provided.encode()).digest(),
-        hashlib.sha256(expected.encode()).digest(),
-    )
+class _NonceStore:
+    """Thread-safe nonce store with automatic expiry."""
+
+    def __init__(self, ttl: float = _NONCE_TTL_S):
+        self._store: dict[str, float] = {}
+        self._ttl   = ttl
+        self._lock  = threading.Lock()
+
+    def check_and_register(self, nonce: str) -> bool:
+        """
+        Return True if this nonce has not been seen before (and register it).
+        Return False if nonce was already used (replay).
+        """
+        now = time.time()
+        with self._lock:
+            self._purge_expired(now)
+            if nonce in self._store:
+                return False
+            self._store[nonce] = now + self._ttl
+            return True
+
+    def _purge_expired(self, now: float) -> None:
+        expired = [k for k, exp in self._store.items() if exp <= now]
+        for k in expired:
+            del self._store[k]
+
+
+_nonce_store = _NonceStore()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Callback sender (CF → n8n)
+#  Per-origin rate limiter
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _RateLimiter:
+    def __init__(self):
+        self._windows: dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def allow(self, origin: str) -> bool:
+        limit  = _rate_limit_rpm()
+        window = _RATE_WINDOW_S
+        now    = time.monotonic()
+        with self._lock:
+            q = self._windows[origin]
+            while q and q[0] < now - window:
+                q.popleft()
+            if len(q) >= limit:
+                return False
+            q.append(now)
+            return True
+
+
+_rate_limiter = _RateLimiter()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Signature validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _compute_signature(secret: str, timestamp: str, nonce: str, body: bytes) -> str:
+    """HMAC-SHA256(secret, f'{timestamp}:{nonce}:{body_hex}')"""
+    msg = f"{timestamp}:{nonce}:".encode() + body
+    return hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
+
+
+def validate_request(
+    body:      bytes,
+    timestamp: str,
+    nonce:     str,
+    signature: str,
+    origin:    str = "unknown",
+) -> Tuple[bool, str]:
+    """
+    Full validation: rate limit → size → timestamp → nonce → HMAC.
+    Returns (ok: bool, reason: str).
+    """
+    secret = _get_secret()
+
+    # Rate limit
+    if not _rate_limiter.allow(origin):
+        return False, "rate_limit_exceeded"
+
+    # Payload size (checked before this function, but guard again)
+    if len(body) > _max_payload():
+        return False, "payload_too_large"
+
+    # Simple token mode (legacy / local use)
+    if _simple_token_mode():
+        ok = hmac.compare_digest(
+            hashlib.sha256(signature.encode()).digest(),
+            hashlib.sha256(secret.encode()).digest(),
+        )
+        return ok, ("ok" if ok else "invalid_token")
+
+    # Timestamp check
+    try:
+        ts = int(timestamp)
+    except (ValueError, TypeError):
+        return False, "invalid_timestamp"
+    drift = abs(time.time() - ts)
+    if drift > _TIMESTAMP_TOLERANCE_S:
+        return False, f"timestamp_drift_{int(drift)}s"
+
+    # Nonce (replay prevention)
+    if not _nonce_store.check_and_register(nonce):
+        return False, "replay_detected"
+
+    # HMAC signature
+    if not secret:
+        return False, "no_secret_configured"
+    expected = _compute_signature(secret, timestamp, nonce, body)
+    if not hmac.compare_digest(expected, signature.lower()):
+        return False, "invalid_signature"
+
+    return True, "ok"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Outbound callback (CF → n8n) — signed
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def send_callback(payload: dict, callback_url: Optional[str] = None) -> bool:
     """
-    POST a result payload to the n8n callback URL.
-    Runs in a daemon thread so it never blocks generation.
-
-    Args:
-        payload:      dict to send as JSON body
-        callback_url: override URL; falls back to config value
-
-    Returns:
-        True if the HTTP request was sent (not whether n8n processed it).
+    POST a signed result payload to the n8n callback URL.
+    Runs in a daemon thread — never blocks generation.
     """
     url = callback_url or _get_callback_url()
     if not url:
-        log.debug("[n8n] No callback URL configured — skipping callback.")
         return False
 
     def _send():
         try:
-            body = json.dumps(payload).encode()
+            body      = json.dumps(payload).encode()
+            secret    = _get_secret()
+            timestamp = str(int(time.time()))
+            nonce     = os.urandom(8).hex()
+            sig       = _compute_signature(secret, timestamp, nonce, body)
+
             req = urllib.request.Request(
                 url,
                 data=body,
                 headers={
-                    "Content-Type":  "application/json",
-                    "X-CF-Token":    _get_token(),
-                    "X-CF-Version":  _cf_version(),
+                    "Content-Type":    "application/json",
+                    "X-CF-Timestamp":  timestamp,
+                    "X-CF-Nonce":      nonce,
+                    "X-CF-Signature":  sig,
+                    "X-CF-Version":    _cf_version(),
                 },
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=15):
                 pass
-            log.debug("[n8n] Callback sent to %s", url)
+            log.debug("[n8n] Signed callback sent to %s", url)
         except Exception as exc:
             log.warning("[n8n] Callback failed: %s", exc)
 
@@ -180,36 +287,65 @@ def _cf_version() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Request handler
+#  Request / response schema
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Strict allowlist of accepted fields — anything else is silently ignored
+_ALLOWED_FIELDS = {
+    "prompt", "negative_prompt", "seed", "steps", "cfg",
+    "prompt_mode", "style", "callback_url", "job_id",
+}
+
+_REQUIRED_FIELDS = {"prompt"}
+
 
 @dataclass
 class WebhookRequest:
     prompt:          str
-    negative_prompt: str  = ""
-    seed:            int  = -1
-    steps:           int  = 30
+    negative_prompt: str   = ""
+    seed:            int   = -1
+    steps:           int   = 30
     cfg:             float = 7.0
-    prompt_mode:     str  = "balanced"
-    style:           str  = ""
-    callback_url:    str  = ""
-    job_id:          str  = ""
+    prompt_mode:     str   = "balanced"
+    style:           str   = ""
+    callback_url:    str   = ""
+    job_id:          str   = ""
 
 
 def parse_webhook_request(body: bytes) -> WebhookRequest:
-    """Parse raw JSON body into a WebhookRequest."""
-    data = json.loads(body)
+    """
+    Parse and strictly validate the JSON body.
+    Only fields in _ALLOWED_FIELDS are accepted.
+    Raises ValueError on missing required fields or type errors.
+    """
     import random
+
+    try:
+        raw = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise ValueError("Body must be a JSON object")
+
+    # Check required fields
+    missing = _REQUIRED_FIELDS - set(raw.keys())
+    if missing:
+        raise ValueError(f"Missing required fields: {missing}")
+
+    # Whitelist-only extraction
+    data = {k: v for k, v in raw.items() if k in _ALLOWED_FIELDS}
+
     return WebhookRequest(
-        prompt          = str(data.get("prompt", "")),
-        negative_prompt = str(data.get("negative_prompt", "")),
+        prompt          = str(data.get("prompt", ""))[:2000],           # cap prompt length
+        negative_prompt = str(data.get("negative_prompt", ""))[:500],
         seed            = int(data.get("seed", random.randint(0, 2**31))),
-        steps           = int(data.get("steps", 30)),
-        cfg             = float(data.get("cfg", 7.0)),
+        steps           = min(int(data.get("steps", 30)), 150),         # cap steps
+        cfg             = min(float(data.get("cfg", 7.0)), 30.0),       # cap cfg
         prompt_mode     = str(data.get("prompt_mode", "balanced")),
-        style           = str(data.get("style", "")),
-        callback_url    = str(data.get("callback_url", "")),
-        job_id          = str(data.get("job_id", f"cf-{int(time.time())}")),
+        style           = str(data.get("style", ""))[:100],
+        callback_url    = str(data.get("callback_url", ""))[:500],
+        job_id          = str(data.get("job_id", f"cf-{int(time.time())}"))[:64],
     )
 
 
@@ -221,7 +357,6 @@ def build_response(
     safety:       Optional[dict] = None,
     error_msg:    str = "",
 ) -> dict:
-    """Build a standardised response payload."""
     resp: dict[str, Any] = {
         "job_id":       req.job_id,
         "status":       status,
@@ -238,7 +373,6 @@ def build_response(
 
     if status == "complete" and image_path:
         resp["image_path"] = image_path
-        # Encode image as base64 for n8n (Binary node can receive it)
         try:
             img_bytes = Path(image_path).read_bytes()
             resp["image_base64"] = base64.b64encode(img_bytes).decode()
@@ -253,20 +387,16 @@ def build_response(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Generation handler (called by the webhook endpoint)
+#  Generation handler
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def handle_generate_request(req: WebhookRequest) -> dict:
-    """
-    Full pipeline: safety check → prompt expand → queue → generate → post-moderate.
-    Returns the response dict (same schema as build_response).
-    """
+    """Safety → expand → queue → respond."""
     from modules.safety import check_prompt
     from modules.prompt_engine import engine, PromptEngine
 
-    # Safety check
     safety_result = check_prompt(req.prompt)
-    safety_dict = {
+    safety_dict   = {
         "allowed":    safety_result.allowed,
         "decision":   safety_result.reason.decision.value,
         "layer":      safety_result.reason.layer,
@@ -277,99 +407,63 @@ def handle_generate_request(req: WebhookRequest) -> dict:
     if not safety_result.allowed:
         return build_response(req, "blocked", safety=safety_dict)
 
-    # Prompt expansion
-    mode = PromptEngine.mode_from_string(req.prompt_mode)
-    expand_result = engine.run(req.prompt, seed=req.seed, mode=mode)
-    trace_dict = {
-        "mode":     expand_result.trace.mode.value,
-        "original": expand_result.trace.original,
-        "added":    expand_result.trace.added,
-        "removed":  expand_result.trace.removed,
-        "notes":    expand_result.trace.notes,
+    mode   = PromptEngine.mode_from_string(req.prompt_mode)
+    result = engine.run(req.prompt, seed=req.seed, mode=mode)
+    trace  = {
+        "mode":            result.trace.mode.value,
+        "mode_used":       result.trace.mode_used.value,
+        "fallback_reason": result.trace.fallback_reason,
+        "original":        result.trace.original,
+        "added":           result.trace.added,
+        "notes":           result.trace.notes,
     }
 
-    # Enqueue generation (deferred — actual generation requires async_worker)
-    # In server mode this triggers via the existing task queue.
-    # Webhook callers receive a "queued" status + callback when done.
-    log.info("[n8n] Job %s queued.  Prompt: %s…", req.job_id, req.prompt[:60])
-
-    # Return immediate acknowledgement; callback fires when generation completes
-    return build_response(
-        req,
-        status="queued",
-        prompt_trace=trace_dict,
-        safety=safety_dict,
-    )
+    log.info("[n8n] Job %s queued. Prompt: %.60s", req.job_id, req.prompt)
+    return build_response(req, "queued", prompt_trace=trace, safety=safety_dict)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Event hooks (forward CF events to n8n)
+#  Event hooks
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class N8nEventHook:
-    """
-    Subscribe to Cookie-Fooocus events and forward them to n8n.
-
-    Events:
-      on_blocked(prompt_hash, reason)         — safety block
-      on_complete(job_id, image_path)         — generation done
-      on_queue_wait(job_id, wait_ms)          — queue wait exceeded threshold
-    """
-
     def __init__(self, callback_url: Optional[str] = None):
         self._url = callback_url or _get_callback_url()
 
     def on_blocked(self, prompt_hash: str, reason: dict) -> None:
         if not _is_enabled():
             return
-        send_callback({
-            "event":       "blocked",
-            "prompt_hash": prompt_hash,
-            "reason":      reason,
-            "ts":          time.time(),
-        }, self._url)
+        send_callback({"event": "blocked", "prompt_hash": prompt_hash, "reason": reason, "ts": time.time()}, self._url)
 
     def on_complete(self, job_id: str, image_path: str) -> None:
         if not _is_enabled():
             return
-        resp = build_response(
-            WebhookRequest(prompt="", job_id=job_id),
-            status="complete",
-            image_path=image_path,
-        )
+        resp = build_response(WebhookRequest(prompt="", job_id=job_id), "complete", image_path=image_path)
         resp["event"] = "complete"
         send_callback(resp, self._url)
 
     def on_queue_wait(self, job_id: str, wait_ms: float) -> None:
         if not _is_enabled() or wait_ms < 5000:
             return
-        send_callback({
-            "event":   "queue_wait",
-            "job_id":  job_id,
-            "wait_ms": wait_ms,
-            "ts":      time.time(),
-        }, self._url)
+        send_callback({"event": "queue_wait", "job_id": job_id, "wait_ms": wait_ms, "ts": time.time()}, self._url)
 
 
-# Singleton hook — attach to generation pipeline events
 n8n_hook = N8nEventHook()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Gradio route registration helper
+#  Gradio / FastAPI route registration
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def register_routes(app) -> None:
     """
     Register n8n webhook routes on the FastAPI app backing Gradio.
-    Call this from webui.py after the Gradio app is created.
-
-    Routes added:
-      POST /cf/webhook/generate   — receive a generation request from n8n
-      GET  /cf/webhook/status     — health check for n8n connectivity test
+    Call from webui.py after Gradio app is created:
+        from modules.n8n_integration import register_routes
+        register_routes(app)
     """
     if not _is_enabled():
-        log.info("[n8n] Integration disabled in safety_policy.json — routes not registered.")
+        log.info("[n8n] Disabled — routes not registered.")
         return
 
     try:
@@ -377,22 +471,40 @@ def register_routes(app) -> None:
 
         @app.post("/cf/webhook/generate")
         async def webhook_generate(request: Request):
-            token = request.headers.get("X-CF-Token", "")
-            if not validate_token(token):
+            origin = request.client.host if request.client else "unknown"
+
+            # Size guard
+            body = await request.body()
+            if len(body) > _max_payload():
                 return Response(
-                    content=json.dumps({"error": "Unauthorized"}),
+                    content=json.dumps({"error": "payload_too_large"}),
+                    status_code=413,
+                    media_type="application/json",
+                )
+
+            # Signature validation
+            ts  = request.headers.get("X-CF-Timestamp", "")
+            nc  = request.headers.get("X-CF-Nonce", "")
+            sig = request.headers.get("X-CF-Signature", "")
+            ok, reason = validate_request(body, ts, nc, sig, origin=origin)
+            if not ok:
+                log.warning("[n8n] Request rejected from %s: %s", origin, reason)
+                return Response(
+                    content=json.dumps({"error": "unauthorized", "reason": reason}),
                     status_code=401,
                     media_type="application/json",
                 )
-            body = await request.body()
+
+            # Parse & handle
             try:
                 req = parse_webhook_request(body)
-            except Exception as exc:
+            except ValueError as exc:
                 return Response(
-                    content=json.dumps({"error": f"Invalid payload: {exc}"}),
+                    content=json.dumps({"error": f"invalid_payload: {exc}"}),
                     status_code=400,
                     media_type="application/json",
                 )
+
             result = handle_generate_request(req)
             return Response(
                 content=json.dumps(result),
@@ -404,16 +516,17 @@ def register_routes(app) -> None:
         async def webhook_status():
             return Response(
                 content=json.dumps({
-                    "status":  "ok",
-                    "version": _cf_version(),
-                    "n8n":     "enabled",
+                    "status":          "ok",
+                    "version":         _cf_version(),
+                    "n8n":             "enabled",
+                    "signing_mode":    "simple_token" if _simple_token_mode() else "hmac_sha256",
                 }),
                 media_type="application/json",
             )
 
-        log.info("[n8n] Webhook routes registered: POST /cf/webhook/generate, GET /cf/webhook/status")
+        log.info("[n8n] Routes registered: POST /cf/webhook/generate, GET /cf/webhook/status")
 
     except ImportError:
-        log.warning("[n8n] FastAPI not available — webhook routes not registered.")
+        log.warning("[n8n] FastAPI not available — routes not registered.")
     except Exception as exc:
         log.warning("[n8n] Route registration failed: %s", exc)

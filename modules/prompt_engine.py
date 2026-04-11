@@ -55,18 +55,23 @@ class PromptMode(str, Enum):
 @dataclass
 class PromptTrace:
     """Full record of what the prompt engine did — shown in the UI Trace View."""
-    mode:     PromptMode
-    original: str
-    added:    list[str]  = field(default_factory=list)
-    removed:  list[str]  = field(default_factory=list)
-    notes:    list[str]  = field(default_factory=list)
+    mode:           PromptMode
+    original:       str
+    mode_used:      PromptMode = PromptMode.BALANCED  # actual mode executed (may differ from requested)
+    fallback_reason: str = ""                          # non-empty if mode was changed due to fallback
+    added:          list[str] = field(default_factory=list)
+    removed:        list[str] = field(default_factory=list)
+    notes:          list[str] = field(default_factory=list)
 
     def display(self) -> str:
         """Return a human-readable trace string for the UI."""
         lines = [
-            f"Mode: {self.mode.value.upper()}",
-            f"Original: {self.original!r}",
+            f"Requested: {self.mode.value.upper()}",
+            f"Executed:  {self.mode_used.value.upper()}",
         ]
+        if self.fallback_reason:
+            lines.append(f"Fallback:  {self.fallback_reason}")
+        lines.append(f"Original:  {self.original!r}")
         if self.added:
             lines.append("Added:    " + " | ".join(f"+ {t}" for t in self.added))
         if self.removed:
@@ -90,6 +95,7 @@ class PromptResult:
 def _expand_raw(prompt: str) -> PromptResult:
     trace = PromptTrace(
         mode=PromptMode.RAW,
+        mode_used=PromptMode.RAW,
         original=prompt,
         notes=["Prompt passed directly to SDXL without modification."],
     )
@@ -180,6 +186,7 @@ def _expand_balanced(prompt: str) -> PromptResult:
 
     trace = PromptTrace(
         mode=PromptMode.BALANCED,
+        mode_used=PromptMode.BALANCED,
         original=prompt,
         added=added,
         notes=["Deterministic structured expansion applied.  No LLM required."],
@@ -263,15 +270,18 @@ def _expand_llm(prompt: str, seed: int) -> PromptResult:
         expanded = ", ".join(p for p in parts if p)
         trace = PromptTrace(
             mode=PromptMode.LLM,
+            mode_used=PromptMode.LLM,
             original=prompt,
             added=added,
             notes=["LLM expansion via Ollama with constrained JSON output."],
         )
         return PromptResult(expanded=expanded, trace=trace)
 
-    # LLM unavailable — fall back to BALANCED silently
+    # LLM unavailable — fall back to BALANCED with explicit reason
     result = _expand_balanced(prompt)
-    result.trace.notes.insert(0, "LLM unavailable — fell back to BALANCED mode.")
+    result.trace.mode           = PromptMode.LLM       # what was requested
+    result.trace.mode_used      = PromptMode.BALANCED   # what actually ran
+    result.trace.fallback_reason = "Ollama unavailable or returned invalid JSON — fell back to BALANCED."
     return result
 
 

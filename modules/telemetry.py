@@ -50,7 +50,7 @@ _WINDOW_SIZE = 100
 
 @dataclass
 class _RollingStats:
-    """Maintains a rolling window of float samples."""
+    """Maintains a rolling window of float samples with percentile support."""
     _samples: deque = field(default_factory=lambda: deque(maxlen=_WINDOW_SIZE))
     _lock:    threading.Lock = field(default_factory=threading.Lock)
 
@@ -58,15 +58,26 @@ class _RollingStats:
         with self._lock:
             self._samples.append(value)
 
+    @staticmethod
+    def _percentile(sorted_vals: list, p: float) -> float:
+        if not sorted_vals:
+            return 0.0
+        k = (len(sorted_vals) - 1) * p / 100.0
+        lo, hi = int(k), min(int(k) + 1, len(sorted_vals) - 1)
+        frac = k - lo
+        return round(sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac, 2)
+
     def snapshot(self) -> dict:
         with self._lock:
             if not self._samples:
-                return {"avg": 0.0, "min": 0.0, "max": 0.0, "count": 0}
-            samples = list(self._samples)
+                return {"avg": 0.0, "min": 0.0, "max": 0.0, "p50": 0.0, "p95": 0.0, "count": 0}
+            samples = sorted(self._samples)
         return {
             "avg":   round(sum(samples) / len(samples), 2),
-            "min":   round(min(samples), 2),
-            "max":   round(max(samples), 2),
+            "min":   round(samples[0], 2),
+            "max":   round(samples[-1], 2),
+            "p50":   self._percentile(samples, 50),
+            "p95":   self._percentile(samples, 95),
             "count": len(samples),
         }
 
@@ -161,22 +172,41 @@ class Telemetry:
     def dashboard(self) -> str:
         """Return a human-readable performance dashboard string."""
         snap = self.snapshot()
-        lines = ["── Performance Dashboard ──────────────────────"]
+        lines = ["── Performance Dashboard ──────────────────────────────────────"]
         for metric, stats in snap["metrics"].items():
             if stats["count"] == 0:
                 continue
             label = metric.replace("_", " ").title()
+            unit  = "MB" if "mb" in metric else "ms"
             lines.append(
-                f"  {label:<28} avg {stats['avg']:>8.1f}  "
-                f"min {stats['min']:>8.1f}  max {stats['max']:>8.1f}  "
-                f"n={stats['count']}"
+                f"  {label:<28}  avg {stats['avg']:>8.1f}{unit}"
+                f"  p50 {stats.get('p50', 0):>8.1f}  p95 {stats.get('p95', 0):>8.1f}"
+                f"  max {stats['max']:>8.1f}  n={stats['count']}"
             )
         if snap["counters"]:
-            lines.append("── Counters ───────────────────────────────────")
+            lines.append("── Counters ────────────────────────────────────────────────────")
             for name, value in snap["counters"].items():
-                lines.append(f"  {name:<32} {value}")
-        lines.append("────────────────────────────────────────────────")
+                lines.append(f"  {name:<36} {value}")
+        lines.append("────────────────────────────────────────────────────────────────")
         return "\n".join(lines)
+
+    def record_vram(self) -> Optional[float]:
+        """
+        Sample current peak VRAM usage and record it as 'vram_peak_mb'.
+        Returns the sampled value, or None if VRAM is not available.
+        Call this from inside a generation slot for meaningful readings.
+        """
+        try:
+            import torch
+            if torch.cuda.is_available():
+                peak_bytes = torch.cuda.max_memory_allocated()
+                torch.cuda.reset_peak_memory_stats()
+                mb = peak_bytes / (1024 ** 2)
+                self.record("vram_peak_mb", mb)
+                return mb
+        except Exception:
+            pass
+        return None
 
     def reset(self) -> None:
         """Clear all metrics and counters (useful between test runs)."""

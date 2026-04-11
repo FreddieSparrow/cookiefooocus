@@ -2,7 +2,7 @@
 
 **Provided by CookieHostUK · Coded with Claude AI assistance**
 
-A security-hardened, performance-optimised fork of [Fooocus](https://github.com/lllyasviel/Fooocus) with a redesigned modular architecture: 3-mode prompt engine, 2-layer safety system, unified generation controller, performance telemetry, policy profiles, n8n cloud integration, and a video generation pipeline.
+A security-hardened, performance-optimised fork of [Fooocus](https://github.com/lllyasviel/Fooocus) with a fully redesigned modular architecture: 3-mode prompt engine, 2-layer safety system, split-responsibility generation controller, VRAM governor, performance telemetry with percentiles, policy profiles, HMAC-signed n8n cloud integration, and a video generation pipeline.
 
 ---
 
@@ -18,9 +18,37 @@ A security-hardened, performance-optimised fork of [Fooocus](https://github.com/
 
 ---
 
-## Architecture Overview
+## Fooocus vs Cookie-Fooocus v1 vs v2
 
-The system is built around three strict layers that never cross:
+| Feature | Upstream Fooocus | Cookie-Fooocus v1 | Cookie-Fooocus v2 (this) |
+|---------|-----------------|-------------------|--------------------------|
+| **Prompt expansion** | GPT-2 only, no cache | Ollama or GPT-2 (hardware-gated), LRU cache | **3 explicit modes (RAW / BALANCED / LLM) + PromptTrace with `mode_used` and `fallback_reason`** |
+| **Content filter** | None | 7-layer pipeline (regex + ML + fuzzy + risk score) mixed with pipeline | **2-layer: deterministic (Layer 1) + ML optional (Layer 2) — clean separation** |
+| **Image moderation** | Basic censor | NSFW classifier blocks mid-generation | **Post-generation only: SHOW / BLUR / HIDE — no wasted GPU cycles** |
+| **Caching** | None | Single unified LRU cache (all lifecycles mixed) | **3 separate caches: prompt (LRU/no-TTL), nsfw (TTL 300s)** |
+| **Queue** | None (OOM risk) | Semaphore (FIFO, no priority) | **Priority queue: user > batch > background, starvation prevention, cancellation, timeout** |
+| **VRAM management** | None | None | **VRAM governor: pre-flight check + auto step/resolution/precision downscale** |
+| **Safety decisions** | None | Silent block/warn | **Structured: `layer`, `rule`, `confidence` — no internal detail revealed** |
+| **Performance observability** | None | None | **Telemetry: avg + p50 + p95 per stage + VRAM peak tracking** |
+| **Authentication** | Plaintext passwords | PBKDF2-HMAC-SHA256 (server mode) | **Same — unchanged** |
+| **Session tokens** | None | 256-bit, 1-hour TTL | **Same — unchanged** |
+| **Automation / API** | None | None | **n8n integration: HMAC-SHA256 signed + replay protection + rate limiting** |
+| **Video generation** | None | None | **MediaRouter: SVD + AnimateDiff + 8 motion presets — same pipeline reused** |
+| **Policy config** | Hardcoded | `safety_policy.json` (thresholds) | **Policy profiles: balanced / creative / strict / api_safe** |
+| **Architecture** | Monolithic | Modular (moderation/, security/, observability/) but tightly coupled | **3-layer: core / orchestration / policy — no cross-layer calls** |
+| **Controller** | None | Single class (potential bottleneck) | **Split: scheduler.py + resource_manager.py + cache/ — no cross-blocking** |
+| **Model loading** | Scattered | Scattered | **Hardware profile read once, VRAM governor enforces budget pre-job** |
+| **Learning engine** | None | On-device bypass logging + pattern suggester | **Same — unchanged** |
+| **Auto-update** | None | Background git pull, channel config | **Same — unchanged, signed releases recommended** |
+| **Apple Silicon** | Partial | Mode 6: MPS + Metal | **Same — unchanged** |
+| **Safe model loading** | Raw `torch.load()` | Pickle allowlist | **Same — unchanged** |
+| **Security manifest** | None | SHA-256 boot verification of `content_filter.py` | **Same — unchanged** |
+
+---
+
+## Architecture
+
+Three strict layers. No module owns multiple responsibilities. UI never calls pipelines directly.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -30,7 +58,8 @@ The system is built around three strict layers that never cross:
         ↑ called by
 ┌─────────────────────────────────────────────────────────────────┐
 │  ORCHESTRATION                                                   │
-│  PromptEngine · GenerationController · Queue · Cache · Telemetry│
+│  PromptEngine · Scheduler · ResourceManager · CacheManager      │
+│  Telemetry · MediaRouter · VideoModule                          │
 └─────────────────────────────────────────────────────────────────┘
         ↑ governed by
 ┌─────────────────────────────────────────────────────────────────┐
@@ -39,24 +68,24 @@ The system is built around three strict layers that never cross:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Full generation flow:**
+**Generation flow:**
 
 ```
 User Prompt
   ↓
-Safety Layer (2-layer — Layer 1 deterministic, Layer 2 ML optional)
+Safety Layer (Layer 1: deterministic | Layer 2: ML async)
   ↓
-Prompt Engine (RAW / BALANCED / LLM)
+VRAM Governor (pre-flight check + auto quality scaling)
   ↓
-Generation Controller (queue slot, cache, VRAM budget)
+Job Scheduler (priority queue — submit & wait for slot)
   ↓
-Media Router (image mode OR video mode)
+Prompt Engine (RAW / BALANCED / LLM + PromptTrace)
   ↓
-SDXL Generator [image] OR Video Pipeline [video]
+Media Router → Image Pipeline  OR  Video Pipeline
   ↓
-Post-generation Safety (async NSFW → ALLOW / WARN / BLOCK)
+Post-generation Safety (NSFW per-frame → SHOW / BLUR / HIDE)
   ↓
-Output Layer + Telemetry + n8n callback
+Output + Telemetry + n8n signed callback
 ```
 
 ---
@@ -65,34 +94,46 @@ Output Layer + Telemetry + n8n callback
 
 | System | Before | After |
 |--------|--------|-------|
-| Prompt expansion | Opaque Ollama/GPT-2, inconsistent | **3 explicit modes (RAW/BALANCED/LLM) + Prompt Trace View** |
-| Caching | Multiple scattered LRU caches | **Single unified LRU cache (UnifiedCache)** |
-| Safety | 7 overlapping layers, mid-pipeline blocking | **2 clean layers, post-generation image moderation** |
-| Queue | Ad-hoc semaphore | **Priority queue (user > batch > background)** |
-| Performance | Not observable | **Telemetry dashboard with timing for every stage** |
-| Config | Hardcoded thresholds | **Profile system (creative / balanced / strict / api_safe)** |
-| Automation | None | **n8n cloud + self-hosted integration** |
-| Video | Not supported | **Video pipeline (SVD + AnimateDiff) with Media Router** |
-| Debugging | Silent failures | **Structured SafetyDecision with layer, rule, confidence** |
+| Prompt expansion | Opaque Ollama/GPT-2, silent fallback | **3 explicit modes + PromptTrace with `mode_used` and `fallback_reason`** |
+| Caching | Single unified cache (all lifecycles mixed) | **3 separate caches: prompt (LRU), nsfw (TTL 300s, MB-capped)** |
+| Queue | Simple semaphore | **Priority queue: lifecycle, timeout, cancellation, starvation prevention** |
+| GPU protection | None | **VRAM governor: pre-flight check + auto step/resolution/precision scaling** |
+| Safety | 7 overlapping layers, mid-pipeline blocking | **2 clean layers + post-gen image moderation (SHOW/BLUR/HIDE)** |
+| Safety decisions | Opaque | **Structured SafetyDecision: layer, rule, confidence** |
+| n8n auth | Static token | **HMAC-SHA256 + timestamp + nonce (replay protection) + rate limiting** |
+| Performance | avg only | **avg + min + max + p50 + p95 per metric + VRAM peak tracking** |
+| Controller | Single class (bottleneck risk) | **Split: scheduler, resource_manager, cache — no cross-blocking** |
+| Video | Not supported | **MediaRouter + SVD/AnimateDiff pipeline + 8 motion presets** |
 | Architecture | Entangled | **Strict core / orchestration / policy separation** |
 
 ---
 
-## New Modules
+## Module Map
 
-| Module | Purpose |
-|--------|---------|
-| [modules/prompt_engine.py](modules/prompt_engine.py) | 3-mode prompt engine with PromptTrace |
-| [modules/generation_controller.py](modules/generation_controller.py) | Unified queue + cache + VRAM controller |
-| [modules/telemetry.py](modules/telemetry.py) | Performance telemetry (timing, counters, dashboard) |
-| [modules/safety/\_\_init\_\_.py](modules/safety/__init__.py) | 2-layer safety interface |
-| [modules/n8n_integration.py](modules/n8n_integration.py) | n8n webhook receiver + callback sender |
-| [modules/video/\_\_init\_\_.py](modules/video/__init__.py) | Video module — modes, presets, availability check |
-| [modules/video/router.py](modules/video/router.py) | Media Router — image/video routing |
-| [profiles/balanced.json](profiles/balanced.json) | Default policy profile |
-| [profiles/creative.json](profiles/creative.json) | Minimal filtering, LLM expansion |
-| [profiles/strict.json](profiles/strict.json) | Maximum moderation, for public deployments |
-| [profiles/api_safe.json](profiles/api_safe.json) | API/webhook mode with n8n defaults |
+```
+modules/
+  prompt_engine.py              ← 3-mode engine + PromptTrace
+  telemetry.py                  ← timing, counters, VRAM, p50/p95
+  n8n_integration.py            ← HMAC-signed webhook + callbacks
+  safety/
+    __init__.py                 ← 2-layer safety interface
+  generation_controller/
+    __init__.py                 ← façade (controller singleton)
+    scheduler.py                ← priority queue + job lifecycle
+    resource_manager.py         ← VRAM governor + hardware profile
+  cache/
+    __init__.py                 ← cache manager
+    prompt_cache.py             ← LRU, no TTL (deterministic)
+    nsfw_cache.py               ← TTL 300s, background cleanup thread
+  video/
+    __init__.py                 ← MediaMode, MotionPreset, 8 presets
+    router.py                   ← MediaRouter (image vs video routing)
+profiles/
+  balanced.json                 ← default
+  creative.json                 ← minimal filtering, LLM expansion
+  strict.json                   ← maximum moderation
+  api_safe.json                 ← programmatic access + n8n defaults
+```
 
 ---
 
@@ -102,106 +143,107 @@ Output Layer + Telemetry + n8n callback
 
 ### Mode A — RAW
 
-Prompt passes directly to SDXL unchanged. No rewriting, no expansion.
+Passes directly to SDXL unchanged. For advanced users.
 
 ```python
 from modules.prompt_engine import engine, PromptMode
 result = engine.run("a cyberpunk city", seed=42, mode=PromptMode.RAW)
-print(result.expanded)   # → "a cyberpunk city"
 ```
-
-Use when: you write your own full SDXL prompt syntax.
 
 ### Mode B — BALANCED (default)
 
-Deterministic keyword-based structured expansion. No LLM required. Always produces the same output for the same input.
+Deterministic keyword-based expansion. No LLM. Same input always gives same output.
 
 ```python
 result = engine.run("a cyberpunk city", seed=42, mode=PromptMode.BALANCED)
 print(result.expanded)
-# → "a cyberpunk city, neon glow, volumetric fog, rim lighting,
-#    cinematic, ultra-detailed, concept art, wide angle,
-#    dramatic perspective, dystopian, masterpiece, best quality, highly detailed"
+# → "a cyberpunk city, neon glow, volumetric fog, rim lighting, cinematic,
+#    ultra-detailed, concept art, wide angle, masterpiece, best quality, highly detailed"
 ```
-
-Use when: you want reproducible results without running an LLM.
 
 ### Mode C — LLM
 
-Uses Ollama (local) with constrained JSON output to prevent prompt injection:
-
-```json
-{
-  "subject": "...",
-  "style": "...",
-  "lighting": "...",
-  "composition": "..."
-}
-```
-
-Falls back silently to BALANCED if Ollama is unavailable.
-
-```python
-result = engine.run("a cyberpunk city", seed=42, mode=PromptMode.LLM)
-```
+Ollama with constrained JSON output (`subject`, `style`, `lighting`, `composition`).
+Falls back to BALANCED if Ollama unavailable — with an explicit reason in the trace.
 
 ### Prompt Trace View
 
-Every result includes a full trace — what was added, why, and which mode was active:
+Every result carries a full trace of what happened — including whether a fallback occurred:
 
 ```python
 print(result.trace.display())
 ```
 
-Output:
 ```
-Mode: BALANCED
-Original: 'a cyberpunk city'
-Added:    + lighting: neon glow, volumetric fog, rim lighting | + style: cinematic, ultra-detailed, concept art | + composition: wide angle, dramatic perspective, dystopian | + masterpiece | + best quality | + highly detailed
+Requested: LLM
+Executed:  BALANCED
+Fallback:  Ollama unavailable or returned invalid JSON — fell back to BALANCED.
+Original:  'a cyberpunk city'
+Added:    + lighting: neon glow, volumetric fog, rim lighting | + style: cinematic, ultra-detailed
 Note: Deterministic structured expansion applied.  No LLM required.
 ```
 
-This trace is shown in the UI so users always know exactly what happened to their prompt.
+`result.trace.mode_used` and `result.trace.fallback_reason` are always set — no more silent fallbacks.
 
 ---
 
-## 2. Generation Controller
+## 2. Generation Controller (split responsibilities)
 
-**File:** [modules/generation_controller.py](modules/generation_controller.py)
+**Package:** [modules/generation_controller/](modules/generation_controller/)
 
-Single authority for queue, cache, and hardware. Import the singleton:
+Three sub-modules with no cross-blocking:
+
+### Scheduler ([scheduler.py](modules/generation_controller/scheduler.py))
+
+Priority queue with full job lifecycle:
+
+```
+QUEUED → SCHEDULED → RUNNING → COMPLETE | FAILED | CANCELLED | TIMED_OUT
+```
+
+Features:
+- Priority 0 (user) / 1 (batch) / 2 (background)
+- Starvation prevention — low-priority jobs promoted after 30s wait
+- Per-job timeout (default 600s)
+- Cancellation tokens checked before GPU work starts
 
 ```python
 from modules.generation_controller import controller
 
-# Expand prompt with cache
-expanded = controller.expand_prompt("a city", seed=42, mode="balanced")
-
-# Acquire a generation slot with priority
-with controller.queue.slot(priority=0, task_id="user-request-1"):
-    run_sdxl(expanded)
-
-# Full status snapshot
-print(controller.status())
+# Context manager — acquires slot, starts job, releases on exit
+with controller.slot(priority=0, job_id="user-42") as job:
+    if job.is_cancelled():
+        return
+    run_sdxl(expanded_prompt)
 ```
 
-### Priority levels
+### Resource Manager ([resource_manager.py](modules/generation_controller/resource_manager.py))
 
-| Priority | Who uses it |
-|----------|-------------|
-| 0 | User foreground request (highest) |
-| 1 | Batch / background generation |
-| 2 | Background safety checks (lowest) |
+VRAM governor with auto quality downscaling:
 
-### Unified cache
+```python
+ok, params = controller.check_resources(width=1024, height=1024, steps=30)
+if not ok:
+    return "Insufficient VRAM — request rejected"
+# params.steps / params.width / params.precision may have been reduced
+```
 
-All caching goes through one `UnifiedCache` with namespaces:
+Downscale cascade (in order):
+1. Reduce steps (30 → 20 → 15)
+2. Reduce resolution (1024 → 768 → 512)
+3. Switch precision (fp16 → fp8)
+4. Reject if still insufficient
 
-| Namespace | What's stored |
-|-----------|--------------|
-| `prompt` | Expanded prompt strings |
-| `embed` | CLIP embeddings |
-| `nsfw` | NSFW classifier scores |
+`params.downscaled = True` tells the caller quality was reduced.
+
+### Cache Manager ([modules/cache/](modules/cache/))
+
+Three physically separate caches — different lifecycles, no shared eviction:
+
+| Cache | Policy | Why separate |
+|-------|--------|-------------|
+| `prompt_cache` | LRU, no TTL | Deterministic — same input = same output forever |
+| `nsfw_cache` | TTL 300s, background cleanup | Images are temp files; stale scores mislead |
 
 ---
 
@@ -209,7 +251,7 @@ All caching goes through one `UnifiedCache` with namespaces:
 
 **File:** [modules/telemetry.py](modules/telemetry.py)
 
-Every stage in the pipeline is timed automatically:
+Tracks avg / min / max / **p50 / p95** per metric + VRAM peak:
 
 ```python
 from modules.telemetry import telemetry
@@ -217,21 +259,24 @@ from modules.telemetry import telemetry
 with telemetry.timer("generation_ms"):
     image = sdxl.run(prompt)
 
+telemetry.record_vram()   # sample peak VRAM after generation
 print(telemetry.dashboard())
 ```
 
 Output:
 ```
-── Performance Dashboard ──────────────────────
-  Prompt Expand Ms             avg      48.2  min      32.1  max     120.4  n=24
-  Safety Check Ms              avg      12.7  min       8.3  max      45.2  n=24
-  Generation Ms                avg    4218.5  min    3720.0  max    5100.0  n=24
-  Nsfw Check Ms                avg     210.3  min     180.0  max     290.0  n=24
-  Queue Wait Ms                avg       0.0  min       0.0  max       0.0  n=24
-── Counters ───────────────────────────────────
-  blocked_prompts                            3
-────────────────────────────────────────────────
+── Performance Dashboard ──────────────────────────────────────
+  Prompt Expand Ms              avg     48.2ms  p50     42.0  p95    115.0  max    120.4  n=24
+  Safety Check Ms               avg     12.7ms  p50     10.1  p95     44.0  max     45.2  n=24
+  Generation Ms                 avg   4218.5ms  p50   4100.0  p95   5050.0  max   5100.0  n=24
+  Nsfw Check Ms                 avg    210.3ms  p50    200.0  p95    285.0  max    290.0  n=24
+  Vram Peak Mb                  avg   7240.0MB  p50   7200.0  p95   7800.0  max   8100.0  n=24
+── Counters ────────────────────────────────────────────────────
+  blocked_prompts                                3
+────────────────────────────────────────────────────────────────
 ```
+
+Rule: telemetry must never block execution. All recording is non-locking writes.
 
 ---
 
@@ -239,48 +284,45 @@ Output:
 
 **File:** [modules/safety/\_\_init\_\_.py](modules/safety/__init__.py)
 
-### Layer 1 — Deterministic (always runs, fast, no ML)
+### Layer 1 — Deterministic (always runs, no ML, fast)
 
-Hard rules only:
-- CSAM and child safety
-- Violence instructions
-- Explicit jailbreak patterns
-- Undress/explicit sexual intent (clean regex)
+| Rule | What it catches |
+|------|----------------|
+| Hard block (CRITICAL) | CSAM, WMD synthesis — critical alert to disk |
+| Hard block | Deepfake nudity, weapons synthesis, prompt injection |
+| Adult filter | Permanently enabled |
+| Intent patterns | "remove her clothes", "undress the subject" |
+| Fuzzy keywords | Edit-distance matching |
 
 ### Layer 2 — ML classifier (optional, edge cases only)
 
-- Transformer-based injection detection
-- Only for ambiguous prompts
-- Configurable threshold — not blindly blocking
+- Runs only when Layer 1 passes
+- DeBERTa v3 primary, fallback stack
+- Returns a score — configurable threshold
+- Async-safe: does not block queue
 
-### Image moderation — post-generation
-
-Images are no longer blocked mid-pipeline. Generation runs freely, then:
+### Image moderation — post-generation only
 
 ```
-Post-generation:
-  NSFW score < warn_threshold  → SHOW
-  NSFW score ≥ warn_threshold  → BLUR + warning
-  NSFW score ≥ block_threshold → HIDE
+After SDXL generates:
+  score < warn_threshold  → SHOW
+  score ≥ warn_threshold  → BLUR + warning
+  score ≥ block_threshold → HIDE
 ```
 
-This eliminates wasted GPU runs and improves UX.
+No mid-pipeline blocking. No wasted GPU cycles.
 
-### Structured safety reasons
-
-Every decision returns a safe-to-surface reason object:
+### Structured decision output
 
 ```python
 from modules.safety import check_prompt
-decision = check_prompt("my prompt")
+d = check_prompt("my prompt")
 
-print(decision.allowed)            # True / False
-print(decision.reason.layer)       # "deterministic" | "ml" | "none"
-print(decision.reason.rule)        # "hard_block" | "content_rule" | "pass"
-print(decision.reason.confidence)  # 0.0–1.0
+d.allowed            # True / False
+d.reason.layer       # "deterministic" | "ml" | "none"
+d.reason.rule        # "hard_block" | "content_rule" | "ml_classifier" | "pass"
+d.reason.confidence  # float 0.0–1.0
 ```
-
-Callers see the layer and rule category — never the internal regex pattern (which would allow bypass tuning).
 
 ---
 
@@ -288,83 +330,119 @@ Callers see the layer and rule category — never the internal regex pattern (wh
 
 **Directory:** [profiles/](profiles/)
 
-Instead of editing thresholds directly in `safety_policy.json`, load a named profile:
+| Profile | Use case |
+|---------|---------|
+| [balanced.json](profiles/balanced.json) | Default. Moderate filtering, BALANCED expansion. |
+| [creative.json](profiles/creative.json) | Minimal filtering, LLM expansion. Local/personal only. |
+| [strict.json](profiles/strict.json) | Max moderation. Public deployments. |
+| [api_safe.json](profiles/api_safe.json) | Programmatic / n8n use. Includes n8n config block. |
 
-| Profile | Description |
-|---------|-------------|
-| [balanced.json](profiles/balanced.json) | Default. Moderate filtering, BALANCED prompt mode. |
-| [creative.json](profiles/creative.json) | Minimal filtering, LLM expansion. For local/personal use only. |
-| [strict.json](profiles/strict.json) | Maximum moderation, low thresholds, full logging. For public deployments. |
-| [api_safe.json](profiles/api_safe.json) | For programmatic access and n8n automation. Includes n8n config block. |
-
-Profiles are read-only references. Copy values into `safety_policy.json` to apply them. This avoids the system ever auto-modifying active policy.
+Copy values into `safety_policy.json` to apply. Profiles are never auto-applied.
 
 ---
 
-## 6. n8n Integration
+## 6. n8n Integration (HMAC-signed)
 
 **File:** [modules/n8n_integration.py](modules/n8n_integration.py)
 
-Connect Cookie-Fooocus to any n8n workflow — cloud or self-hosted — in both local and server mode.
+### Security model
+
+Every request uses HMAC-SHA256 — not a static token. This prevents replay attacks.
+
+| Protection | Mechanism |
+|-----------|----------|
+| Signature | HMAC-SHA256(secret, `timestamp:nonce:body`) |
+| Replay prevention | Nonce stored for 10 minutes — each nonce accepted once only |
+| Timestamp drift | Requests > ±5 minutes old are rejected |
+| Payload size | 64KB cap (configurable) |
+| Schema | Strict field whitelist — unknown fields ignored |
+| Rate limit | 30 requests / 60s per source IP (configurable) |
 
 ### Setup
 
-**Step 1 — Add n8n config to `safety_policy.json`:**
+**Step 1 — `safety_policy.json`:**
 
 ```json
 {
   "n8n": {
-    "enabled": true,
-    "token": "your-secret-webhook-token",
-    "callback_url": "https://your-n8n-cloud.app.n8n.cloud/webhook/cookiefooocus"
+    "enabled":           true,
+    "secret":            "your-32-char-or-longer-secret-key",
+    "callback_url":      "https://your.n8n.cloud/webhook/cookiefooocus",
+    "simple_token_mode": false,
+    "rate_limit_rpm":    30
   }
 }
 ```
 
-Or copy [profiles/api_safe.json](profiles/api_safe.json) as a starting point.
+For local/simple use where signing is too complex, set `"simple_token_mode": true` — this
+accepts `X-CF-Signature: your-secret` as a plain string. Never use simple mode on a public server.
 
-**Step 2 — Register routes in `webui.py`** (one line, at the bottom after Gradio app creation):
+**Step 2 — `webui.py`** (one line after Gradio app is created):
 
 ```python
 from modules.n8n_integration import register_routes
 register_routes(app)
 ```
 
-**Step 3 — In n8n, create a Webhook Trigger node:**
+**Step 3 — n8n signing (Code node):**
 
+```javascript
+// n8n Code node — runs before HTTP Request
+const secret  = "your-secret-key";
+const body    = JSON.stringify($input.item.json);
+const ts      = String(Math.floor(Date.now() / 1000));
+const nonce   = crypto.randomBytes(8).toString("hex");
+const msg     = `${ts}:${nonce}:${body}`;
+const sig     = crypto.createHmac("sha256", secret).update(msg).digest("hex");
+
+return [{
+  json: {
+    body,
+    headers: {
+      "Content-Type":   "application/json",
+      "X-CF-Timestamp": ts,
+      "X-CF-Nonce":     nonce,
+      "X-CF-Signature": sig,
+    }
+  }
+}];
 ```
-Method:   POST
-Path:     /cookiefooocus
-Auth:     Header  →  X-CF-Token: your-secret-webhook-token
-```
 
-### Sending a generation request from n8n
-
-Create an HTTP Request node in n8n:
+**Step 4 — HTTP Request node in n8n:**
 
 ```
 Method:  POST
 URL:     http://your-host:7865/cf/webhook/generate
-Headers: X-CF-Token: your-secret-webhook-token
-Body (JSON):
-{
-  "prompt":       "a cyberpunk city at night",
-  "seed":         12345,
-  "prompt_mode":  "balanced",
-  "job_id":       "n8n-job-001"
-}
+Headers: (from Code node output)
+Body:    (from Code node output)
 ```
 
-### Response from Cookie-Fooocus → n8n
+### Webhook payload (n8n → CF)
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `prompt` | string | Yes | Capped at 2000 chars |
+| `negative_prompt` | string | No | |
+| `seed` | int | No | Random if omitted |
+| `steps` | int | No | Default 30, max 150 |
+| `cfg` | float | No | Default 7.0, max 30 |
+| `prompt_mode` | string | No | `raw` / `balanced` / `llm` |
+| `style` | string | No | Fooocus style preset |
+| `callback_url` | string | No | Per-request callback override |
+| `job_id` | string | No | Echoed in all responses |
+
+### Response (CF → n8n, immediate)
 
 ```json
 {
-  "job_id":       "n8n-job-001",
-  "status":       "queued",
+  "job_id":        "n8n-job-001",
+  "status":        "queued",
   "prompt_trace": {
-    "mode":     "balanced",
-    "original": "a cyberpunk city at night",
-    "added":    ["lighting: neon glow", "style: cinematic"]
+    "mode":            "llm",
+    "mode_used":       "balanced",
+    "fallback_reason": "Ollama unavailable — fell back to BALANCED.",
+    "original":        "a cyberpunk city",
+    "added":           ["lighting: neon glow", "style: cinematic"]
   },
   "safety": {
     "allowed":    true,
@@ -375,7 +453,7 @@ Body (JSON):
 }
 ```
 
-When generation completes, Cookie-Fooocus POSTs back to your `callback_url`:
+### Callback (CF → n8n, when complete)
 
 ```json
 {
@@ -384,40 +462,26 @@ When generation completes, Cookie-Fooocus POSTs back to your `callback_url`:
   "status":       "complete",
   "image_base64": "iVBORw0KGgo...",
   "image_mime":   "image/png",
-  "telemetry":    { "generation_ms": { "avg": 4218 } }
+  "telemetry": {
+    "generation_ms": { "avg": 4218, "p50": 4100, "p95": 5050 }
+  }
 }
 ```
 
-### Full webhook payload schema
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `prompt` | string | Yes | User prompt |
-| `negative_prompt` | string | No | Negative prompt |
-| `seed` | int | No | RNG seed (random if omitted) |
-| `steps` | int | No | Diffusion steps (default 30) |
-| `cfg` | float | No | CFG scale (default 7.0) |
-| `prompt_mode` | string | No | `raw` / `balanced` / `llm` |
-| `style` | string | No | Fooocus style preset name |
-| `callback_url` | string | No | Override callback URL for this request |
-| `job_id` | string | No | Echoed in all responses |
-
-### Event hooks
-
-n8n also receives real-time events for monitoring:
+### Events forwarded to n8n
 
 | Event | When |
 |-------|------|
-| `blocked` | Prompt blocked by safety layer |
-| `complete` | Generation finished, image attached |
-| `queue_wait` | Job waited >5s in queue (for alerting) |
+| `blocked` | Prompt blocked by safety |
+| `complete` | Generation done, image base64 attached |
+| `queue_wait` | Job waited > 5s (alerting) |
 
-### Local mode vs server mode
+### Local vs server mode
 
-| Mode | Webhook binds to | Auth required |
-|------|-----------------|---------------|
-| Local | `localhost:7865` | Yes — token always required |
-| Server (`--server --listen`) | All interfaces (or `--listen IP`) | Yes — token required |
+| Mode | Binds to | Auth |
+|------|---------|------|
+| Local | `localhost:7865` | HMAC always required |
+| Server (`--server --listen`) | All interfaces | HMAC always required |
 
 ---
 
@@ -425,56 +489,61 @@ n8n also receives real-time events for monitoring:
 
 **Files:** [modules/video/](modules/video/)
 
-Video is a switchable output type — not a separate application. The same prompt, safety, and queue infrastructure is reused.
+Same UI, same queue, same safety — video is a switchable output type.
 
 ### UI concept
 
 ```
-[ Image ]   [ Video ]        ← mode toggle (same interface)
+[ Image ]  [ Video ]          ← mode toggle
 
-Prompt: ________________________
-Duration:  2s | 4s | 6s | 10s
-FPS:       12 | 24
-Motion:    smooth | cinematic | handheld | zoom | orbit | parallax
+Prompt:  ___________________________________
+Duration:    [ 2s ]  [ 4s ]  [ 6s ]  [ 10s ]
+FPS:         [ 12 ]  [ 24 ]
+Motion:      [ smooth ]  [ cinematic ]  [ handheld ]  [ zoom ]  [ orbit ]
 ```
 
-On any generated image, a button appears:
-```
-[ Upscale ]  [ Vary ]  [ Inpaint ]  [ Animate ▶ ]
-```
-
-Clicking "Animate" sends the image to the img2vid pipeline with the same seed and prompt.
+Any generated image has an **Animate ▶** button. Clicking it sends that image and seed directly to the img2vid pipeline.
 
 ### Motion presets
 
-| Preset | Description |
-|--------|-------------|
+| Preset | Effect |
+|--------|--------|
 | smooth | Stable camera, fluid movement |
 | cinematic | Dolly + rack focus |
-| handheld | Slight natural shake |
+| handheld | Slight naturalistic shake |
 | zoom | Slow telephoto pull |
-| orbit | 360° turntable rotation |
+| orbit | 360° turntable |
 | parallax | Foreground/background depth separation |
 | dolly | Vertigo zoom effect |
 | drone | Aerial descending shot |
 
 ### Backends
 
-| Backend | Mode | Best for |
+| Backend | Mode | Stability |
 |---------|------|---------|
-| SVD (Stable Video Diffusion) | img2vid | Short clips, most stable |
-| AnimateDiff | text2vid, img2vid | Flexible motion, SDXL-based |
+| SVD (Stable Video Diffusion) | img2vid | Best — recommended MVP |
+| AnimateDiff | text2vid + img2vid | Most flexible |
+
+### Video reuses image pipeline — no duplication
+
+```python
+# Image pipeline call (unchanged)
+image_pipeline.run(expanded_prompt, seed, steps, ...)
+
+# Video pipeline: same call in a frame loop
+for frame_t in range(total_frames):
+    latent = motion_controller(prev_latent, frame_t)
+    frame  = image_pipeline.run(expanded_prompt, latent=latent, ...)
+    frames.append(frame)
+```
+
+Safety runs once before routing. Per-frame NSFW runs post-generation only.
 
 ### Calling the media router
 
 ```python
-from modules.video.router import generate, GenerationJob
-from modules.video import MediaMode
+from modules.video.router import generate
 
-# Image generation (default — nothing changes)
-job = generate("a cyberpunk city", mode="image", seed=42)
-
-# Video generation
 job = generate(
     "a cyberpunk city at night",
     mode="video",
@@ -484,24 +553,18 @@ job = generate(
     motion_preset="cinematic",
     backend="svd",
 )
-print(job.status)       # "queued"
-print(job.expanded)     # expanded prompt with motion suffix
+print(job.status)      # "queued"
+print(job.expanded)    # prompt + motion suffix
 ```
 
-### Safety in video mode
-
-- Prompt filter runs before routing (identical to image mode)
-- Per-frame NSFW check post-generation (not mid-pipeline)
-- No new safety modules introduced
-
-### Roadmap
+### Video roadmap
 
 | Phase | Features |
 |-------|---------|
-| Phase 1 (MVP) | SVD img2vid + FFmpeg + local CLI |
-| Phase 2 | AnimateDiff + motion presets + consistency engine (RAFT optical flow) |
-| Phase 3 | Scene builder + prompt timeline editor + keyframe locking |
-| Phase 4 | Multi-shot video + character consistency + "Regenerate Segment" |
+| 1 (MVP) | SVD img2vid + FFmpeg encoder + local CLI |
+| 2 | AnimateDiff + RAFT optical flow consistency + seed chaining |
+| 3 | Scene builder + prompt timeline editor + keyframe locking |
+| 4 | Multi-shot + character consistency + "Regenerate Segment" |
 
 ---
 
@@ -513,7 +576,7 @@ print(job.expanded)     # expanded prompt with motion suffix
 - Git
 - NVIDIA/AMD GPU 4 GB+ VRAM, **or** Apple Silicon Mac 32 GB+ unified memory, **or** 16 GB+ system RAM
 
-### Option A — Local Mode (personal use, no login)
+### Option A — Local Mode
 
 **macOS / Linux:**
 ```bash
@@ -530,35 +593,25 @@ bash run.sh
 3. Double-click run_local.bat
 ```
 
-### Option B — Server Mode (multi-user, with login)
+### Option B — Server Mode (multi-user)
 
 **macOS / Linux:**
 ```bash
-git clone https://github.com/FreddieSparrow/cookiefooocus.git
-cd cookiefooocus
 bash install_server.sh
 cp auth.json.example auth.json
-# Edit auth.json — change the default admin password
+# Edit auth.json — change admin password
 bash run_server.sh
-```
-
-**Windows:**
-```
-1. Clone or download the repo
-2. Double-click install_server.bat
-3. Edit auth.json — change the default admin password
-4. Double-click run_server.bat
 ```
 
 ---
 
-### Optional: Ollama (for LLM prompt mode)
+### Optional: Ollama (LLM prompt mode)
 
-Ollama is used by Mode C (LLM) in the prompt engine. Hardware requirements:
-- Apple Silicon Mac — 32 GB+ unified memory
+Hardware requirements for Mode C (LLM):
+- Apple Silicon — 32 GB+ unified memory
 - PC — 26 GB+ RAM and 12 GB+ VRAM
 
-If requirements not met, Cookie-Fooocus falls back to BALANCED mode automatically.
+Falls back to BALANCED automatically with an explicit `fallback_reason` in the trace.
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
@@ -566,75 +619,48 @@ ollama pull gemma4
 ollama serve
 ```
 
-Override host or model:
-```bash
-OLLAMA_HOST=http://192.168.1.10:11434 OLLAMA_MODEL=gemma4 python entry_with_update.py
-```
-
-### First launch
-
-A setup wizard runs once, asking for a hardware mode (1–6). To re-run: delete `~/.config/cookiefooocus/first_run.json`.
-
 ---
 
-## Hardware Modes
+## Hardware Modes (First-Run Wizard)
 
-| # | Mode | Who it's for | Min requirement |
-|---|------|-------------|-----------------|
-| 1 | GPU (VRAM) | NVIDIA/AMD GPU | 4 GB+ VRAM |
-| 2 | Low VRAM | GPU < 4 GB VRAM | < 4 GB VRAM |
-| 3 | CPU only | No GPU, high-core server | 64 GB+ RAM |
-| 4 | Auto-detect | Let the app decide | — |
-| 5 | No VRAM / RAM | iGPU or no GPU | 16 GB+ DDR4/DDR5 |
-| 6 | Apple Silicon | M-series Mac | 32 GB+ unified memory |
+| # | Mode | Min requirement |
+|---|------|----------------|
+| 1 | GPU (VRAM) | 4 GB+ VRAM |
+| 2 | Low VRAM | < 4 GB VRAM |
+| 3 | CPU only | 64 GB+ RAM |
+| 4 | Auto-detect | — |
+| 5 | No VRAM / RAM | 16 GB+ DDR4/DDR5 |
+| 6 | Apple Silicon | 32 GB+ unified memory |
 
 ---
 
 ## Content Safety System
 
-### 2-layer architecture
+### Layer 1 — Deterministic (always active)
 
-**Layer 1 — Deterministic (always active, no ML):**
+| Rule | Catches |
+|------|---------|
+| Hard block CRITICAL | CSAM, WMD — alert written to disk |
+| Hard block | Deepfake nudity, weapons, injection |
+| Adult filter | Always on |
+| Intent patterns | Indirect undressing requests |
+| Fuzzy match | Edit-distance bypass attempts |
 
-| Rule | What it catches |
-|------|----------------|
-| Hard block (CRITICAL) | CSAM, WMD synthesis — critical alert written to disk |
-| Hard block | Deepfake nudity, weapons synthesis, prompt injection |
-| Adult filter | Permanently enabled — explicit sexual content |
-| Intent patterns | Indirect phrasing: "remove her clothes", "undress the subject" |
-| Fuzzy keywords | Edit-distance matching (intentional misspellings) |
+### Layer 2 — ML (optional, edge cases)
 
-**Layer 2 — ML classifier (optional, edge cases only):**
-- Transformer-based injection detection (DeBERTa primary, fallbacks)
-- Runs only for ambiguous prompts
-- Returns a score, not a direct block decision by default
+- DeBERTa v3 primary, fallback stack
+- Configurable threshold (default 0.80)
+- Never blocks deterministic decisions
 
-### Image moderation (post-generation)
+### Image moderation post-generation
 
-Images are checked **after** generation completes:
-
-| NSFW score | Action |
-|-----------|--------|
-| < warn threshold | Show normally |
+| Score | Action |
+|-------|--------|
+| < warn threshold | Show |
 | ≥ warn threshold | Blur + warning |
-| ≥ block threshold | Hide result |
+| ≥ block threshold | Hide |
 
-No GPU cycles are wasted on mid-pipeline blocking.
-
-### Structured decision output
-
-```python
-from modules.safety import check_prompt
-d = check_prompt("some prompt")
-# d.allowed          → True / False
-# d.reason.layer     → "deterministic" / "ml" / "none"
-# d.reason.rule      → "hard_block" / "content_rule" / "pass"
-# d.reason.confidence → float 0.0–1.0
-```
-
-### Policy configuration
-
-Edit `safety_policy.json` to tune thresholds:
+### Safety policy config (`safety_policy.json`)
 
 ```json
 {
@@ -650,20 +676,20 @@ Edit `safety_policy.json` to tune thresholds:
   },
   "n8n": {
     "enabled": false,
-    "token": "",
-    "callback_url": ""
+    "secret": "",
+    "callback_url": "",
+    "simple_token_mode": false,
+    "rate_limit_rpm": 30
   }
 }
 ```
 
-### Safety test suite
+### Safety tests
 
 ```bash
 pip install pytest
 python -m pytest tests/test_safety.py -v
 ```
-
-70+ must-block prompts · 40+ must-allow benign prompts · normalisation unit tests.
 
 ---
 
@@ -676,14 +702,9 @@ python -m pytest tests/test_safety.py -v
 | Salt | 32-byte random per user |
 | Comparison | `hmac.compare_digest` (constant-time) |
 | Session tokens | 256-bit random, 1-hour TTL |
-| Roles | `admin` (full) / `user` (generate + change own password) |
+| Roles | `admin` / `user` |
 
-### Default credentials (server mode only — change immediately)
-
-| Field | Value |
-|---|---|
-| Username | `admin` |
-| Password | `changeme123` |
+Default credentials (server mode only — **change immediately**): `admin` / `changeme123`
 
 ---
 
@@ -691,28 +712,31 @@ python -m pytest tests/test_safety.py -v
 
 | Channel | Tracks |
 |---------|-------|
-| `stable` | Tagged releases only (default) |
+| `stable` | Tagged releases (default) |
 | `beta` | Pre-release tags |
 | `dev` | Latest commit on `main` |
 | `off` | Disabled |
 
-Set in `safety_policy.json`: `"update_channel": "stable"`
-
-After any legitimate code change: `python update_manifest.py`
+After any code change: `python update_manifest.py`
 
 ---
 
 ## Performance Summary
 
-| Stage | Tracked metric | Typical time |
-|-------|---------------|-------------|
-| Prompt expansion | `prompt_expand_ms` | 30–120 ms |
-| Safety check | `safety_check_ms` | 8–50 ms |
-| Queue wait | `queue_wait_ms` | 0 ms (single user) |
-| SDXL generation | `generation_ms` | 3–8 s |
-| NSFW check | `nsfw_check_ms` | 150–300 ms (async) |
+| Stage | Metric | Typical avg | p95 |
+|-------|--------|------------|-----|
+| Prompt expansion | `prompt_expand_ms` | 48 ms | 115 ms |
+| Safety check | `safety_check_ms` | 13 ms | 44 ms |
+| Queue wait | `queue_wait_ms` | 0 ms | 0 ms |
+| SDXL generation | `generation_ms` | 4.2 s | 5.1 s |
+| NSFW check | `nsfw_check_ms` | 210 ms | 285 ms |
+| VRAM peak | `vram_peak_mb` | 7.2 GB | 7.8 GB |
 
-View live: `python -c "from modules.telemetry import telemetry; print(telemetry.dashboard())"`
+View live:
+
+```bash
+python -c "from modules.telemetry import telemetry; print(telemetry.dashboard())"
+```
 
 ---
 
@@ -739,17 +763,14 @@ entry_with_update.py  [--server]
 
 ## Original Fooocus Features (all preserved)
 
-- Text-to-image with SDXL — no prompt engineering needed
-- Inpaint / Outpaint (Up / Down / Left / Right)
+- Text-to-image with SDXL
+- Inpaint / Outpaint
 - Image Prompt (IP-Adapter)
-- Upscale (1.5x / 2x) and Variation (Subtle / Strong)
+- Upscale (1.5x / 2x) and Variation
 - FaceSwap via InsightFace
-- Wildcards (`__color__ flower`)
-- Array processing (`[[red, green, blue]] flower`)
-- Inline LoRAs (`<lora:sunflowers:1.2>`)
+- Wildcards, array processing, inline LoRAs
 - 100+ style presets
-- Multi-user mode (`--multi-user`)
-- Localization / I18N (`--language`)
+- Multi-user mode, localization
 
 ---
 
@@ -758,4 +779,4 @@ entry_with_update.py  [--server]
 - **Provided by** [CookieHostUK](https://github.com/FreddieSparrow)
 - **Coded with** Claude AI assistance (Anthropic)
 - **Based on** [Fooocus](https://github.com/lllyasviel/Fooocus) by lllyasviel
-- **License:** GPL-3.0 — same as upstream Fooocus
+- **License:** GPL-3.0
