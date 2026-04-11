@@ -1,0 +1,37 @@
+{
+  "_comment": "Cookie-Fooocus v3 — local runtime overrides. Applied on top of config/base.json.",
+  "mode": "local",
+  "port": 7865,
+  "share": false,
+  "theme": null,
+  "language": "default",
+  "disable_image_log": false,
+
+  "queue": {
+    "max_jobs_per_user": 4,
+    "starvation_promote_after_s": 30,
+    "job_timeout_s": 600
+  },
+
+  "vram": {
+    "strict_mode": false,
+    "allow_auto_downscale": true,
+    "downscale_cascade": ["steps", "resolution", "precision"],
+    "hard_reject_threshold_mb": 0
+  },
+
+  "update": {
+    "check_on_startup": true,
+    "prompt_user": true,
+    "auto_restart": false
+  },
+
+  "telemetry": {
+    "enabled": true,
+    "auto_tune": false
+  },
+
+  "safety": {
+    "layer2_ml_enabled": true
+  }
+}
