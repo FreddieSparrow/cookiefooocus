@@ -13,6 +13,20 @@ job.media_type.
 This is the only file that imports both pipelines.  Everything else is
 isolated behind it.
 
+Video cost control
+─────────────────────────────────────────────────────────────────────────────
+  Video frames scale as duration_s × fps.  Without a cap, one request can
+  trigger 100+ sequential SDXL inference passes.
+
+  Hard limits (applied before the job hits the queue):
+    MAX_TOTAL_FRAMES = 96   — hard frame ceiling
+    MAX_DURATION_S   = 10.0 — never allow duration beyond this
+    MAX_FPS          = 24   — cap FPS at the UI maximum
+
+  If the requested combination exceeds the frame cap, duration_s is reduced
+  proportionally.  The job is never rejected for cost — only clamped.
+  The actual limits used are recorded in job.metadata["frame_cap"].
+
 Provided by CookieHostUK — coded with Claude AI assistance.
 """
 
@@ -26,6 +40,12 @@ from typing import Any, Optional
 from modules.video import MediaMode, MotionPreset
 
 log = logging.getLogger("cookiefooocus.video.router")
+
+# Video cost hard limits — prevent one request from burning the GPU.
+# 4s @ 24fps = 96 frames (reference point for the cap).
+_MAX_TOTAL_FRAMES = 96
+_MAX_DURATION_S   = 10.0
+_MAX_FPS          = 24
 
 
 @dataclass
@@ -134,8 +154,6 @@ def _route_image(
     negative_prompt: str, style: str,
 ) -> GenerationJob:
     """Delegate to the existing SDXL async_worker pipeline."""
-    # The actual generation is handled by async_worker.py / default_pipeline.py.
-    # This router prepares the job and returns it; the caller enqueues it.
     job.status   = "queued"
     job.metadata.update({
         "seed":            seed,
@@ -156,7 +174,7 @@ def _route_video(
     motion_preset: str, input_image: Optional[str],
     backend: str,
 ) -> GenerationJob:
-    """Delegate to the video pipeline."""
+    """Delegate to the video pipeline, enforcing frame cost limits."""
     from modules.video import is_video_available, MotionPreset, get_motion_prompt
 
     if not is_video_available():
@@ -164,6 +182,25 @@ def _route_video(
         job.error  = "Video dependencies not installed.  Run: pip install diffusers[video]"
         log.warning("[router] Video pipeline unavailable: diffusers not installed.")
         return job
+
+    # ── Cost control ───────────────────────────────────────────────────────────
+    # Cap inputs to hard maximums, then check the resulting frame count.
+    fps       = min(int(fps), _MAX_FPS)
+    duration_s = min(float(duration_s), _MAX_DURATION_S)
+
+    total_frames = int(duration_s * fps)
+    frame_cap_applied = False
+    if total_frames > _MAX_TOTAL_FRAMES:
+        original_duration = duration_s
+        duration_s        = _MAX_TOTAL_FRAMES / fps
+        total_frames      = int(duration_s * fps)
+        frame_cap_applied = True
+        log.info(
+            "[router] Video job %s: duration clamped %.1fs → %.1fs "
+            "(%d frames, limit=%d).",
+            job.job_id, original_duration, duration_s, total_frames, _MAX_TOTAL_FRAMES,
+        )
+    # ──────────────────────────────────────────────────────────────────────────
 
     # Append motion prompt to expanded prompt
     try:
@@ -183,12 +220,18 @@ def _route_video(
         "negative":      negative_prompt,
         "duration_s":    duration_s,
         "fps":           fps,
+        "total_frames":  total_frames,
         "motion":        motion_preset,
         "input_image":   input_image,
         "backend":       backend,
+        "frame_cap": {
+            "applied":      frame_cap_applied,
+            "max_frames":   _MAX_TOTAL_FRAMES,
+            "actual_frames": total_frames,
+        },
     })
     log.info(
-        "[router] Video job %s queued (backend=%s duration=%.1fs fps=%d).",
-        job.job_id, backend, duration_s, fps,
+        "[router] Video job %s queued (backend=%s duration=%.1fs fps=%d frames=%d).",
+        job.job_id, backend, duration_s, fps, total_frames,
     )
     return job

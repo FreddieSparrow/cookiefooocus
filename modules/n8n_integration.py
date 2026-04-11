@@ -12,6 +12,7 @@ Security model
   Payload size cap        — 64KB max body (prevents memory exhaustion)
   Schema validation       — strict field whitelist (prevents injection via JSON)
   Per-origin rate limit   — 30 requests / 60s per source IP
+  Cost validation         — pixel budget + step cap before job reaches queue
 
 Signing protocol (n8n → CF)
 ─────────────────────────────────────────────────────────────────────────────
@@ -38,7 +39,9 @@ Config (safety_policy.json)
       "callback_url":      "https://your.n8n.cloud/webhook/cookiefooocus",
       "simple_token_mode": false,
       "max_payload_bytes": 65536,
-      "rate_limit_rpm":    30
+      "rate_limit_rpm":    30,
+      "max_pixels":        1048576,
+      "max_steps_api":     60
     }
   }
 
@@ -64,11 +67,16 @@ from typing import Any, Optional, Tuple
 
 log = logging.getLogger("cookiefooocus.n8n")
 
-_MAX_PAYLOAD_BYTES_DEFAULT = 65_536  # 64 KB
-_TIMESTAMP_TOLERANCE_S     = 300     # ±5 minutes
-_NONCE_TTL_S               = 600     # keep nonces for 10 minutes
+_MAX_PAYLOAD_BYTES_DEFAULT = 65_536   # 64 KB
+_TIMESTAMP_TOLERANCE_S     = 300      # ±5 minutes
+_NONCE_TTL_S               = 600      # keep nonces for 10 minutes
 _RATE_WINDOW_S             = 60
-_RATE_LIMIT_DEFAULT        = 30      # requests per window
+_RATE_LIMIT_DEFAULT        = 30       # requests per window
+
+# Cost limits — prevent valid signed requests from burning the GPU
+_MAX_PIXELS_DEFAULT  = 1024 * 1024   # 1 MP (1024×1024 max per API request)
+_MAX_STEPS_DEFAULT   = 60            # steps cap for API requests
+_MAX_FRAMES_DEFAULT  = 96            # video: hard cap on total frames
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -110,6 +118,14 @@ def _max_payload() -> int:
 
 def _rate_limit_rpm() -> int:
     return int(_cfg("rate_limit_rpm", _RATE_LIMIT_DEFAULT))
+
+
+def _max_pixels() -> int:
+    return int(_cfg("max_pixels", _MAX_PIXELS_DEFAULT))
+
+
+def _max_steps_api() -> int:
+    return int(_cfg("max_steps_api", _MAX_STEPS_DEFAULT))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -293,7 +309,7 @@ def _cf_version() -> str:
 # Strict allowlist of accepted fields — anything else is silently ignored
 _ALLOWED_FIELDS = {
     "prompt", "negative_prompt", "seed", "steps", "cfg",
-    "prompt_mode", "style", "callback_url", "job_id",
+    "width", "height", "prompt_mode", "style", "callback_url", "job_id",
 }
 
 _REQUIRED_FIELDS = {"prompt"}
@@ -306,6 +322,8 @@ class WebhookRequest:
     seed:            int   = -1
     steps:           int   = 30
     cfg:             float = 7.0
+    width:           int   = 1024
+    height:          int   = 1024
     prompt_mode:     str   = "balanced"
     style:           str   = ""
     callback_url:    str   = ""
@@ -316,7 +334,7 @@ def parse_webhook_request(body: bytes) -> WebhookRequest:
     """
     Parse and strictly validate the JSON body.
     Only fields in _ALLOWED_FIELDS are accepted.
-    Raises ValueError on missing required fields or type errors.
+    Raises ValueError on missing required fields, type errors, or cost limit violations.
     """
     import random
 
@@ -336,12 +354,31 @@ def parse_webhook_request(body: bytes) -> WebhookRequest:
     # Whitelist-only extraction
     data = {k: v for k, v in raw.items() if k in _ALLOWED_FIELDS}
 
+    # Parse width / height with hard caps
+    width  = min(int(data.get("width",  1024)), 2048)
+    height = min(int(data.get("height", 1024)), 2048)
+
+    # Cost validation: pixel budget
+    pixels = width * height
+    max_px = _max_pixels()
+    if pixels > max_px:
+        limit_side = int(max_px ** 0.5)
+        raise ValueError(
+            f"Resolution {width}×{height} ({pixels:,} px) exceeds API limit "
+            f"({max_px:,} px, ~{limit_side}×{limit_side}). Reduce width or height."
+        )
+
+    # Cost validation: step cap
+    steps = min(int(data.get("steps", 30)), _max_steps_api())
+
     return WebhookRequest(
-        prompt          = str(data.get("prompt", ""))[:2000],           # cap prompt length
+        prompt          = str(data.get("prompt", ""))[:2000],
         negative_prompt = str(data.get("negative_prompt", ""))[:500],
         seed            = int(data.get("seed", random.randint(0, 2**31))),
-        steps           = min(int(data.get("steps", 30)), 150),         # cap steps
-        cfg             = min(float(data.get("cfg", 7.0)), 30.0),       # cap cfg
+        steps           = steps,
+        cfg             = min(float(data.get("cfg", 7.0)), 30.0),
+        width           = width,
+        height          = height,
         prompt_mode     = str(data.get("prompt_mode", "balanced")),
         style           = str(data.get("style", ""))[:100],
         callback_url    = str(data.get("callback_url", ""))[:500],
@@ -350,12 +387,13 @@ def parse_webhook_request(body: bytes) -> WebhookRequest:
 
 
 def build_response(
-    req:          WebhookRequest,
-    status:       str,
-    image_path:   Optional[str] = None,
-    prompt_trace: Optional[dict] = None,
-    safety:       Optional[dict] = None,
-    error_msg:    str = "",
+    req:                WebhookRequest,
+    status:             str,
+    image_path:         Optional[str] = None,
+    prompt_trace:       Optional[dict] = None,
+    safety:             Optional[dict] = None,
+    error_msg:          str = "",
+    resource_adjustment: Optional[dict] = None,
 ) -> dict:
     resp: dict[str, Any] = {
         "job_id":       req.job_id,
@@ -364,6 +402,9 @@ def build_response(
         "safety":       safety or {},
         "telemetry":    {},
     }
+
+    if resource_adjustment:
+        resp["resource_adjustment"] = resource_adjustment
 
     try:
         from modules.telemetry import telemetry
@@ -391,7 +432,7 @@ def build_response(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def handle_generate_request(req: WebhookRequest) -> dict:
-    """Safety → expand → queue → respond."""
+    """Safety → expand → resource check → queue → respond."""
     from modules.safety import check_prompt
     from modules.prompt_engine import engine, PromptEngine
 
@@ -418,8 +459,46 @@ def handle_generate_request(req: WebhookRequest) -> dict:
         "notes":           result.trace.notes,
     }
 
+    # Resource pre-check: validate VRAM budget before the job hits the queue.
+    # Reports any quality downscaling back to the caller so n8n workflows
+    # can make informed decisions (e.g. skip post-processing if steps reduced).
+    resource_adjustment = None
+    try:
+        from modules.generation_controller.resource_manager import governor, GenParams
+        params = GenParams(width=req.width, height=req.height, steps=req.steps)
+        ok, adjusted = governor.check_and_scale(params)
+        if not ok:
+            return build_response(
+                req, "rejected",
+                safety=safety_dict,
+                error_msg="Insufficient VRAM — request exceeds available resources.",
+            )
+        if adjusted.downscaled:
+            resource_adjustment = {
+                "downscaled": True,
+                "original": {
+                    "steps":  params.steps,
+                    "width":  params.width,
+                    "height": params.height,
+                },
+                "final": {
+                    "steps":     adjusted.steps,
+                    "width":     adjusted.width,
+                    "height":    adjusted.height,
+                    "precision": adjusted.precision,
+                },
+                "note": "Quality was automatically reduced to fit available VRAM.",
+            }
+    except Exception as exc:
+        log.debug("[n8n] Resource pre-check skipped: %s", exc)
+
     log.info("[n8n] Job %s queued. Prompt: %.60s", req.job_id, req.prompt)
-    return build_response(req, "queued", prompt_trace=trace, safety=safety_dict)
+    return build_response(
+        req, "queued",
+        prompt_trace=trace,
+        safety=safety_dict,
+        resource_adjustment=resource_adjustment,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -495,7 +574,7 @@ def register_routes(app) -> None:
                     media_type="application/json",
                 )
 
-            # Parse & handle
+            # Parse & cost-validate
             try:
                 req = parse_webhook_request(body)
             except ValueError as exc:
@@ -520,6 +599,11 @@ def register_routes(app) -> None:
                     "version":         _cf_version(),
                     "n8n":             "enabled",
                     "signing_mode":    "simple_token" if _simple_token_mode() else "hmac_sha256",
+                    "limits": {
+                        "max_pixels":   _max_pixels(),
+                        "max_steps":    _max_steps_api(),
+                        "max_frames":   _MAX_FRAMES_DEFAULT,
+                    },
                 }),
                 media_type="application/json",
             )
