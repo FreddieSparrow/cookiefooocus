@@ -14,7 +14,7 @@
   <!-- ── NAV ─────────────────────────────────────────────────────────────── -->
   <nav>
     <div class="nav-inner">
-      <span class="nav-logo">🍪 Cookie-Fooocus</span>
+      <a href="https://cookiehost.uk" target="_blank" style="text-decoration:none"><span class="nav-logo">🍪 Cookie-Fooocus</span></a>
       <div class="nav-links">
         <a href="#demo">Try it</a>
         <a href="#features">Features</a>
@@ -61,6 +61,24 @@
         For the full experience, <a href="#install">install locally</a>.
       </p>
 
+      <div class="demo-system-boundary">
+        <div class="boundary-item boundary-demo">
+          <span class="boundary-icon">🌐</span>
+          <div>
+            <strong>This demo</strong>
+            <span>Static site · client-side prompt filter · <a href="https://pollinations.ai" target="_blank">Pollinations.ai</a> backend (external, uncontrolled)</span>
+          </div>
+        </div>
+        <div class="boundary-separator">vs</div>
+        <div class="boundary-item boundary-full">
+          <span class="boundary-icon">🍪</span>
+          <div>
+            <strong>Full Cookie-Fooocus</strong>
+            <span>Local / server install · VRAM governor · priority queue · decision chain · 4-mode prompt engine · full 2-layer safety</span>
+          </div>
+        </div>
+      </div>
+
       <div class="demo-box">
         <div class="demo-input-row">
           <input
@@ -98,7 +116,7 @@
             </select>
           </label>
           <label class="option-label toggle-label">
-            Safe mode
+            Safe mode <span class="option-hint">(client-side preview)</span>
             <input type="checkbox" id="safe-toggle" checked />
             <span class="toggle-track"><span class="toggle-thumb"></span></span>
           </label>
@@ -125,8 +143,8 @@
           <a id="download-link" class="btn-ghost btn-sm" download="cookie-fooocus-generated.jpg">Download</a>
           <button onclick="generate()" class="btn-ghost btn-sm">Regenerate</button>
           <span class="demo-note">
-            Full Cookie-Fooocus has 4 prompt modes (including STANDARD GPT-2), VRAM governor, multi-GPU routing, priority queue, and video output.
-            <a href="#install">Install locally →</a>
+            Generated via Pollinations.ai. Client-side safety preview only — full enforcement (VRAM governor, decision chain, 4-mode prompt engine, priority queue) requires a local install.
+            <a href="#install">Install →</a>
           </span>
         </div>
       </div>
@@ -142,6 +160,7 @@
       <div class="features-grid">
 
         <div class="feature-card">
+          <div class="feature-deploy-badge">Full deployment only</div>
           <div class="feature-icon">⚡</div>
           <h3>Won't crash on low VRAM</h3>
           <p>Predictive VRAM model estimates memory before a job starts. If budget is tight, it auto-scales: steps first, then resolution, then precision. You get a result, not an OOM error.</p>
@@ -151,6 +170,7 @@
         </div>
 
         <div class="feature-card">
+          <div class="feature-deploy-badge">Full deployment only</div>
           <div class="feature-icon">🔍</div>
           <h3>No silent changes</h3>
           <p>Every job has a decision chain — an audit log of what each stage decided about your parameters. No more "something silently reduced my steps."</p>
@@ -172,6 +192,7 @@
         </div>
 
         <div class="feature-card">
+          <div class="feature-deploy-badge">Full deployment only</div>
           <div class="feature-icon">📊</div>
           <h3>Real performance data</h3>
           <p>p50 and p95 per stage, VRAM peak tracking. The VRAM prediction model learns from actual usage using EWA smoothing — gets more accurate over time without oscillating.</p>
@@ -184,12 +205,14 @@
         </div>
 
         <div class="feature-card">
+          <div class="feature-deploy-badge">Full deployment only</div>
           <div class="feature-icon">💾</div>
           <h3>L1/L2 cache hierarchy</h3>
           <p>In-memory LRU for speed, SQLite for persistence. Cold starts warm from disk automatically. Cache failures are non-fatal — a write error never fails a generation job.</p>
         </div>
 
         <div class="feature-card">
+          <div class="feature-deploy-badge">Full deployment only</div>
           <div class="feature-icon">🎥</div>
           <h3>Video pipeline</h3>
           <p>Same UI, same safety, same queue — switch to video output in one click. 8 motion presets. Frame cost cap prevents one request from running 144 sequential inference passes.</p>
@@ -467,9 +490,10 @@ ollama serve</code></pre>
     <div class="footer-inner">
       <div class="footer-left">
         <span class="footer-logo">🍪 Cookie-Fooocus v2.5</span>
-        <span class="footer-by">by <a href="https://github.com/FreddieSparrow" target="_blank">CookieHostUK</a></span>
+        <span class="footer-by">by <a href="https://cookiehost.uk" target="_blank">CookieHostUK</a></span>
       </div>
       <div class="footer-links">
+        <a href="https://cookiehost.uk" target="_blank">CookieHostUK</a>
         <a href="https://github.com/FreddieSparrow/cookiefooocus" target="_blank">GitHub</a>
         <a href="https://github.com/FreddieSparrow/cookiefooocus/blob/main/readme.md" target="_blank">Docs</a>
         <a href="https://github.com/lllyasviel/Fooocus" target="_blank">Upstream Fooocus</a>

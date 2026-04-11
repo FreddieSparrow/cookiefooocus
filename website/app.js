@@ -1,15 +1,24 @@
 /**
  * Cookie-Fooocus — Browser Demo
  * ─────────────────────────────────────────────────────────────────────────────
- * Generates images via Pollinations.ai (free, no API key) with Cookie-Fooocus
- * safety logic ported to JavaScript:
+ * SYSTEM BOUNDARY — what this file does vs what Cookie-Fooocus does:
  *
- *   Layer 1  — deterministic prompt rules (keyword + pattern checks)
- *              mirrors modules/safety/__init__.py Layer 1
- *   Layer 2  — post-generation NSFW image classification via NSFWJS
- *              same SHOW / BLUR / HIDE thresholds as the Python version
+ *   This file (demo, static site):
+ *     • Client-side prompt keyword filter — a preview of Layer 1 rules
+ *     • Client-side NSFW image check via NSFWJS — a preview of post-gen check
+ *     • Image generation via Pollinations.ai (external, uncontrolled backend)
  *
- * Safety settings (matches safety_policy.json defaults):
+ *   Full Cookie-Fooocus (local / server install):
+ *     • Full 2-layer safety system (deterministic + ML classifier)
+ *     • VRAM governor, priority queue, decision chain, telemetry
+ *     • 4-mode prompt engine (RAW / BALANCED / STANDARD GPT-2 / LLM)
+ *     • n8n HMAC-signed webhooks, auth, video pipeline, multi-GPU routing
+ *
+ * The client-side filters here are a client-side preview of the same rules
+ * that run server-side in the full system.  They are NOT a substitute for
+ * server-side enforcement.  Pollinations.ai applies its own independent filters.
+ *
+ * Safety settings (mirrors safety_policy.json defaults for reference only):
  *   NSFW block threshold:  0.65
  *   NSFW warn threshold:   0.35
  *
@@ -161,10 +170,13 @@ async function generate() {
     return;
   }
 
-  // ── Layer 1: prompt safety check ──────────────────────────────────────────
+  // ── Client-side prompt safety preview ────────────────────────────────────
+  // Note: this is a client-side preview of Layer 1 rules.
+  // Full server-side enforcement (2-layer safety + ML classifier) only runs
+  // in a local or server Cookie-Fooocus install — not in this demo.
   const safetyResult = checkPromptSafety(rawPrompt);
   if (!safetyResult.allowed) {
-    showError(safetyResult.reason);
+    showError(safetyResult.reason + ' (Client-side safety preview — full enforcement requires local install.)');
     return;
   }
 

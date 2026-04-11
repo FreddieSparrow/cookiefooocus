@@ -1,6 +1,6 @@
 # Cookie-Fooocus v2.5
 
-**Provided by CookieHostUK · Coded with Claude AI assistance**
+**Provided by [CookieHostUK](https://cookiehost.uk) · Coded with Claude AI assistance**
 
 A security-hardened, performance-optimised fork of [Fooocus](https://github.com/lllyasviel/Fooocus) designed to run reliably on **low-end hardware**, while scaling cleanly to high-end GPUs and **Apple Silicon (M-series)**. Rebuilt from scratch with a strict 3-layer architecture: 3-mode prompt engine, 2-layer safety system, VRAM governor, priority queue, HMAC-signed n8n integration, and a video generation pipeline.
 
@@ -1118,7 +1118,7 @@ Formatters are implemented. Next: wire `format_decision_chain_html()` into the G
 
 ## Credits & Attribution
 
-- **Provided by** [CookieHostUK](https://github.com/FreddieSparrow)
+- **Provided by** [CookieHostUK](https://cookiehost.uk)
 - **Coded with** Claude AI assistance (Anthropic)
 - **Based on** [Fooocus](https://github.com/lllyasviel/Fooocus) by lllyasviel
 - **License:** GPL-3.0
