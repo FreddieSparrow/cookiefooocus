@@ -1,8 +1,8 @@
-# Cookie-Fooocus
+# Cookie-Fooocus v2.5
 
 **Provided by CookieHostUK · Coded with Claude AI assistance**
 
-A security-hardened, performance-optimised fork of [Fooocus](https://github.com/lllyasviel/Fooocus) with a fully redesigned modular architecture: 3-mode prompt engine, 2-layer safety system, split-responsibility generation controller, VRAM governor, performance telemetry with percentiles, policy profiles, HMAC-signed n8n cloud integration, and a video generation pipeline.
+A security-hardened, performance-optimised fork of [Fooocus](https://github.com/lllyasviel/Fooocus) designed to run reliably on **low-end hardware**, while scaling cleanly to high-end GPUs and **Apple Silicon (M-series)**. Rebuilt from scratch with a strict 3-layer architecture: 3-mode prompt engine, 2-layer safety system, VRAM governor, priority queue, HMAC-signed n8n integration, and a video generation pipeline.
 
 ---
 
@@ -18,31 +18,242 @@ A security-hardened, performance-optimised fork of [Fooocus](https://github.com/
 
 ---
 
-## Fooocus vs Cookie-Fooocus v1 vs v2
+## Quick Start
 
-| Feature | Upstream Fooocus | Cookie-Fooocus v1 | Cookie-Fooocus v2 (this) |
-|---------|-----------------|-------------------|--------------------------|
-| **Prompt expansion** | GPT-2 only, no cache | Ollama or GPT-2 (hardware-gated), LRU cache | **3 explicit modes (RAW / BALANCED / LLM) + PromptTrace with `mode_used` and `fallback_reason`** |
-| **Content filter** | None | 7-layer pipeline (regex + ML + fuzzy + risk score) mixed with pipeline | **2-layer: deterministic (Layer 1) + ML optional (Layer 2) — clean separation** |
-| **Image moderation** | Basic censor | NSFW classifier blocks mid-generation | **Post-generation only: SHOW / BLUR / HIDE — no wasted GPU cycles** |
-| **Caching** | None | Single unified LRU cache (all lifecycles mixed) | **3 separate caches: prompt (LRU/no-TTL), nsfw (TTL 300s)** |
-| **Queue** | None (OOM risk) | Semaphore (FIFO, no priority) | **Priority queue: user > batch > background, starvation prevention, cancellation, timeout** |
-| **VRAM management** | None | None | **VRAM governor: pre-flight check + auto step/resolution/precision downscale** |
-| **Safety decisions** | None | Silent block/warn | **Structured: `layer`, `rule`, `confidence` — no internal detail revealed** |
-| **Performance observability** | None | None | **Telemetry: avg + p50 + p95 per stage + VRAM peak tracking** |
-| **Authentication** | Plaintext passwords | PBKDF2-HMAC-SHA256 (server mode) | **Same — unchanged** |
-| **Session tokens** | None | 256-bit, 1-hour TTL | **Same — unchanged** |
-| **Automation / API** | None | None | **n8n integration: HMAC-SHA256 signed + replay protection + rate limiting** |
-| **Video generation** | None | None | **MediaRouter: SVD + AnimateDiff + 8 motion presets — same pipeline reused** |
-| **Policy config** | Hardcoded | `safety_policy.json` (thresholds) | **Policy profiles: balanced / creative / strict / api_safe** |
-| **Architecture** | Monolithic | Modular (moderation/, security/, observability/) but tightly coupled | **3-layer: core / orchestration / policy — no cross-layer calls** |
-| **Controller** | None | Single class (potential bottleneck) | **Split: scheduler.py + resource_manager.py + cache/ — no cross-blocking** |
-| **Model loading** | Scattered | Scattered | **Hardware profile read once, VRAM governor enforces budget pre-job** |
-| **Learning engine** | None | On-device bypass logging + pattern suggester | **Same — unchanged** |
-| **Auto-update** | None | Background git pull, channel config | **Same — unchanged, signed releases recommended** |
-| **Apple Silicon** | Partial | Mode 6: MPS + Metal | **Same — unchanged** |
-| **Safe model loading** | Raw `torch.load()` | Pickle allowlist | **Same — unchanged** |
-| **Security manifest** | None | SHA-256 boot verification of `content_filter.py` | **Same — unchanged** |
+**If you only read one section, read this.**
+
+### macOS / Linux
+
+```bash
+git clone https://github.com/FreddieSparrow/cookiefooocus.git
+cd cookiefooocus
+bash install_local.sh
+bash run.sh
+```
+
+### Windows
+
+```
+1. Clone or download the repo (ZIP)
+2. Double-click install_local.bat
+3. Double-click run_local.bat
+```
+
+Then open: `http://localhost:7865`
+
+That's it for local use. The rest of this README covers hardware tuning, optional features, and server mode.
+
+---
+
+## Version History at a Glance
+
+| Version | What changed |
+|---------|-------------|
+| **Original Fooocus** | SDXL UI by lllyasviel. No queue, no safety, no API. Crashes on low VRAM. |
+| **Cookie-Fooocus v1** | Added Ollama/GPT-2 prompt expansion, 7-layer safety pipeline, basic caching, PBKDF2 auth, Apple Silicon (Mode 6). Modular structure but tightly coupled. |
+| **Cookie-Fooocus v2** | Full architecture redesign. 3-layer separation (core / orchestration / policy). 3-mode prompt engine with PromptTrace. 2-layer safety with clean interfaces. Priority queue replacing semaphore. Structured SafetyDecision output. |
+| **Cookie-Fooocus v2.5 (this)** | Adds: VRAM governor with predictive downscaling. p50/p95 telemetry. HMAC-signed n8n integration with replay protection. Video pipeline (SVD + AnimateDiff + 8 motion presets). Policy profiles. Separate prompt/NSFW caches with independent lifecycles. |
+
+---
+
+## Why This Exists
+
+Upstream Fooocus crashes on low VRAM. It silently falls back without telling you. It has no queue, so concurrent jobs can OOM the GPU. It has no telemetry, so you can't tell what's slow.
+
+Cookie-Fooocus fixes those things structurally — not with config flags, but with actual architecture changes:
+
+- **Won't crash on low VRAM** — governor adjusts quality before the job starts instead of failing mid-generation
+- **No silent fallbacks** — every prompt trace tells you exactly what mode ran and why
+- **No GPU overload** — priority queue with timeout and starvation prevention
+- **Measurable performance** — p50/p95 latency per stage, not just averages
+- **Automatable** — HMAC-signed n8n integration that's actually safe to expose
+
+---
+
+## What Makes This Different (Feature Impact)
+
+### Smarter Prompting
+
+Three explicit modes — you choose, it doesn't guess:
+
+| Mode | What it does | Use when |
+|------|-------------|----------|
+| RAW | Passes your prompt unchanged | You know exactly what you want |
+| BALANCED | Deterministic keyword expansion (no LLM, fast) | Best default for most users |
+| LLM | Ollama rewrites your prompt creatively | You want more expressive results and have the hardware |
+
+Every result carries a full trace — including whether a fallback happened and why.
+
+### Runs on Weak Hardware
+
+The VRAM governor runs a pre-flight check before every generation. If memory is tight, it adjusts automatically:
+
+```
+Steps ↓  →  Resolution ↓  →  Precision ↓  →  Reject (only if nothing else works)
+```
+
+Instead of `CUDA out of memory`, you get a slightly lower quality image that actually generates.
+
+### Real Performance Tracking
+
+Telemetry records avg / p50 / p95 per stage and VRAM peak. p95 matters — it tells you your worst-case, not just your average. If generation is slow, you'll know exactly which stage is the bottleneck.
+
+### Actual Security
+
+- Prompt safety: 2-layer system (fast deterministic rules + optional ML classifier)
+- API auth: HMAC-SHA256 signed requests with replay protection — not static tokens
+- Image moderation: post-generation only, so no GPU cycles wasted on blocked prompts
+
+### Video, Same Pipeline
+
+Switch from image to video in the UI. Same queue, same safety, same prompt engine. No separate tooling.
+
+---
+
+## Hardware Guide
+
+### Minimum — It will run, slowly
+
+- 16 GB RAM, CPU-only mode
+- Expect 5–20 minutes per image
+
+### Recommended — Smooth experience
+
+- 4–8 GB VRAM GPU (NVIDIA/AMD)
+  **or**
+- Apple Silicon Mac, 32 GB+ unified memory
+
+### High-End — Full feature set
+
+- 12 GB+ VRAM GPU
+- Enables LLM prompt mode and stable video generation
+
+---
+
+## Apple Silicon (M1 / M2 / M3 / M4)
+
+Cookie-Fooocus runs well on Apple Silicon. Select **Mode 6** on first run.
+
+**What works:**
+- MPS (Metal backend) acceleration
+- Unified memory means no hard VRAM ceiling — large jobs that would OOM on a GPU with the same spec will complete
+- All features including video and LLM mode (with Ollama)
+
+**What to expect:**
+- Slower than NVIDIA for raw diffusion throughput
+- LLM mode requires Ollama installed separately (see Optional: Ollama below)
+- Best results with 32 GB+ unified memory; 16 GB is workable with BALANCED mode only
+
+**Recommended settings for Apple Silicon:**
+
+```
+Hardware Mode: 6 (Apple Silicon / MPS)
+Prompt Mode:  BALANCED (default) — LLM if you have 32 GB+
+Resolution:   768 or 1024
+Steps:        20–25
+```
+
+---
+
+## Installation (Full)
+
+### Prerequisites
+
+- Python 3.10+
+- Git
+- NVIDIA/AMD GPU 4 GB+ VRAM, **or** Apple Silicon Mac 32 GB+ unified memory, **or** 16 GB+ system RAM
+
+### Option A — Local Mode (single user)
+
+**macOS / Linux:**
+```bash
+git clone https://github.com/FreddieSparrow/cookiefooocus.git
+cd cookiefooocus
+bash install_local.sh
+bash run.sh
+```
+
+**Windows:**
+```
+1. Clone or download the repo
+2. Double-click install_local.bat
+3. Double-click run_local.bat
+```
+
+### Option B — Server Mode (multi-user)
+
+**macOS / Linux:**
+```bash
+bash install_server.sh
+cp auth.json.example auth.json
+# Edit auth.json — change the admin password before starting
+bash run_server.sh
+```
+
+Default credentials (change immediately): `admin` / `changeme123`
+
+---
+
+### Optional: Ollama (LLM Prompt Mode)
+
+Only needed if you want Mode C (LLM) prompt expansion. Falls back to BALANCED automatically if not installed — with an explicit `fallback_reason` in the trace.
+
+Hardware requirement: Apple Silicon 32 GB+, or PC with 26 GB+ RAM and 12 GB+ VRAM.
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull gemma4
+ollama serve
+```
+
+---
+
+## Hardware Modes (First-Run Wizard)
+
+On first run you'll be asked to select a hardware mode. Pick the one that matches your system:
+
+| # | Mode | When to use |
+|---|------|-------------|
+| 1 | GPU (VRAM) | NVIDIA/AMD with 4 GB+ VRAM |
+| 2 | Low VRAM | NVIDIA/AMD with less than 4 GB VRAM |
+| 3 | CPU only | No GPU, 64 GB+ RAM |
+| 4 | Auto-detect | Not sure — let the system decide |
+| 5 | No VRAM / RAM | 16 GB+ DDR4/DDR5, minimum viable |
+| 6 | Apple Silicon | M-series Mac |
+
+---
+
+## Common Errors
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `CUDA out of memory` | Not using Cookie-Fooocus properly — the governor should prevent this | Select a lower hardware mode, or reduce resolution and steps manually |
+| `Ollama unavailable` | Ollama not running | Run `ollama serve`, or switch to BALANCED mode |
+| `Job timed out` | Generation exceeded 600s | Reduce resolution or steps; check VRAM with `telemetry.dashboard()` |
+| `Invalid HMAC signature` | n8n secret mismatch | Confirm `secret` in `safety_policy.json` matches the n8n Code node |
+| `Nonce already used` | Replay attack or duplicate request | Normal if retrying — generate a new nonce per request |
+| Blank output / hidden image | NSFW score above block threshold | Lower `nsfw_block_threshold` in `safety_policy.json` if legitimate |
+| Very slow on Apple Silicon | Using CPU mode accidentally | Confirm Mode 6 is selected; check for `mps` in startup logs |
+
+---
+
+## Performance Tips
+
+### For weak hardware (< 4 GB VRAM or CPU-only)
+- Use BALANCED prompt mode (not LLM)
+- Set resolution to 512 or 768
+- Set steps to 15–20
+- The VRAM governor handles the rest automatically
+
+### For Apple Silicon
+- Use Mode 6 (MPS)
+- BALANCED mode at 1024 is comfortable on 32 GB
+- Avoid LLM mode unless you have 32 GB+ and Ollama running
+
+### For high-end GPUs (12 GB+ VRAM)
+- Keep fp16
+- LLM mode is stable
+- Video generation works well at 1024
 
 ---
 
@@ -90,24 +301,6 @@ Output + Telemetry + n8n signed callback
 
 ---
 
-## What Changed vs Previous Version
-
-| System | Before | After |
-|--------|--------|-------|
-| Prompt expansion | Opaque Ollama/GPT-2, silent fallback | **3 explicit modes + PromptTrace with `mode_used` and `fallback_reason`** |
-| Caching | Single unified cache (all lifecycles mixed) | **3 separate caches: prompt (LRU), nsfw (TTL 300s, MB-capped)** |
-| Queue | Simple semaphore | **Priority queue: lifecycle, timeout, cancellation, starvation prevention** |
-| GPU protection | None | **VRAM governor: pre-flight check + auto step/resolution/precision scaling** |
-| Safety | 7 overlapping layers, mid-pipeline blocking | **2 clean layers + post-gen image moderation (SHOW/BLUR/HIDE)** |
-| Safety decisions | Opaque | **Structured SafetyDecision: layer, rule, confidence** |
-| n8n auth | Static token | **HMAC-SHA256 + timestamp + nonce (replay protection) + rate limiting** |
-| Performance | avg only | **avg + min + max + p50 + p95 per metric + VRAM peak tracking** |
-| Controller | Single class (bottleneck risk) | **Split: scheduler, resource_manager, cache — no cross-blocking** |
-| Video | Not supported | **MediaRouter + SVD/AnimateDiff pipeline + 8 motion presets** |
-| Architecture | Entangled | **Strict core / orchestration / policy separation** |
-
----
-
 ## Module Map
 
 ```
@@ -143,7 +336,7 @@ profiles/
 
 ### Mode A — RAW
 
-Passes directly to SDXL unchanged. For advanced users.
+Passes directly to SDXL unchanged. For advanced users who know exactly what they want.
 
 ```python
 from modules.prompt_engine import engine, PromptMode
@@ -152,7 +345,7 @@ result = engine.run("a cyberpunk city", seed=42, mode=PromptMode.RAW)
 
 ### Mode B — BALANCED (default)
 
-Deterministic keyword-based expansion. No LLM. Same input always gives same output.
+Deterministic keyword-based expansion. No LLM. Same input always gives same output — predictable, fast, no external dependencies.
 
 ```python
 result = engine.run("a cyberpunk city", seed=42, mode=PromptMode.BALANCED)
@@ -163,12 +356,11 @@ print(result.expanded)
 
 ### Mode C — LLM
 
-Ollama with constrained JSON output (`subject`, `style`, `lighting`, `composition`).
-Falls back to BALANCED if Ollama unavailable — with an explicit reason in the trace.
+Ollama with constrained JSON output (`subject`, `style`, `lighting`, `composition`). Falls back to BALANCED if Ollama is unavailable — with an explicit reason recorded in the trace.
 
-### Prompt Trace View
+### Prompt Trace (no more silent fallbacks)
 
-Every result carries a full trace of what happened — including whether a fallback occurred:
+Every result carries a full trace:
 
 ```python
 print(result.trace.display())
@@ -180,10 +372,10 @@ Executed:  BALANCED
 Fallback:  Ollama unavailable or returned invalid JSON — fell back to BALANCED.
 Original:  'a cyberpunk city'
 Added:    + lighting: neon glow, volumetric fog, rim lighting | + style: cinematic, ultra-detailed
-Note: Deterministic structured expansion applied.  No LLM required.
+Note: Deterministic structured expansion applied. No LLM required.
 ```
 
-`result.trace.mode_used` and `result.trace.fallback_reason` are always set — no more silent fallbacks.
+`result.trace.mode_used` and `result.trace.fallback_reason` are always set.
 
 ---
 
@@ -195,13 +387,12 @@ Three sub-modules with no cross-blocking:
 
 ### Scheduler ([scheduler.py](modules/generation_controller/scheduler.py))
 
-Priority queue with full job lifecycle:
+Priority queue with full job lifecycle management:
 
 ```
 QUEUED → SCHEDULED → RUNNING → COMPLETE | FAILED | CANCELLED | TIMED_OUT
 ```
 
-Features:
 - Priority 0 (user) / 1 (batch) / 2 (background)
 - Starvation prevention — low-priority jobs promoted after 30s wait
 - Per-job timeout (default 600s)
@@ -219,7 +410,7 @@ with controller.slot(priority=0, job_id="user-42") as job:
 
 ### Resource Manager ([resource_manager.py](modules/generation_controller/resource_manager.py))
 
-VRAM governor with auto quality downscaling:
+VRAM governor with auto quality downscaling. Runs before every generation. If memory is insufficient, it adjusts parameters rather than letting the job fail:
 
 ```python
 ok, params = controller.check_resources(width=1024, height=1024, steps=30)
@@ -228,7 +419,8 @@ if not ok:
 # params.steps / params.width / params.precision may have been reduced
 ```
 
-Downscale cascade (in order):
+Downscale cascade (applied in order until memory fits):
+
 1. Reduce steps (30 → 20 → 15)
 2. Reduce resolution (1024 → 768 → 512)
 3. Switch precision (fp16 → fp8)
@@ -238,7 +430,7 @@ Downscale cascade (in order):
 
 ### Cache Manager ([modules/cache/](modules/cache/))
 
-Three physically separate caches — different lifecycles, no shared eviction:
+Two physically separate caches — different lifecycles, no shared eviction:
 
 | Cache | Policy | Why separate |
 |-------|--------|-------------|
@@ -251,7 +443,7 @@ Three physically separate caches — different lifecycles, no shared eviction:
 
 **File:** [modules/telemetry.py](modules/telemetry.py)
 
-Tracks avg / min / max / **p50 / p95** per metric + VRAM peak:
+Tracks avg / min / max / **p50 / p95** per metric + VRAM peak. p95 is the important number — it reveals worst-case performance, not just typical performance.
 
 ```python
 from modules.telemetry import telemetry
@@ -276,7 +468,13 @@ Output:
 ────────────────────────────────────────────────────────────────
 ```
 
-Rule: telemetry must never block execution. All recording is non-locking writes.
+View live:
+
+```bash
+python -c "from modules.telemetry import telemetry; print(telemetry.dashboard())"
+```
+
+Rule: telemetry never blocks execution. All recording is non-locking writes.
 
 ---
 
@@ -284,24 +482,28 @@ Rule: telemetry must never block execution. All recording is non-locking writes.
 
 **File:** [modules/safety/\_\_init\_\_.py](modules/safety/__init__.py)
 
-### Layer 1 — Deterministic (always runs, no ML, fast)
+Two clean layers. No overlapping responsibilities.
+
+### Layer 1 — Deterministic (always on, no ML, fast)
 
 | Rule | What it catches |
 |------|----------------|
-| Hard block (CRITICAL) | CSAM, WMD synthesis — critical alert to disk |
+| Hard block (CRITICAL) | CSAM, WMD synthesis — alert written to disk |
 | Hard block | Deepfake nudity, weapons synthesis, prompt injection |
 | Adult filter | Permanently enabled |
 | Intent patterns | "remove her clothes", "undress the subject" |
-| Fuzzy keywords | Edit-distance matching |
+| Fuzzy keywords | Edit-distance matching against bypass attempts |
 
 ### Layer 2 — ML classifier (optional, edge cases only)
 
-- Runs only when Layer 1 passes
+- Only runs when Layer 1 passes (no wasted compute on obvious blocks)
 - DeBERTa v3 primary, fallback stack
-- Returns a score — configurable threshold
-- Async-safe: does not block queue
+- Returns a score — configurable threshold (default 0.80)
+- Async-safe: does not block the queue
 
 ### Image moderation — post-generation only
+
+Safety checks happen before and after generation, not during. This means no GPU cycles are wasted if a prompt is blocked, and no mid-generation interruptions.
 
 ```
 After SDXL generates:
@@ -309,8 +511,6 @@ After SDXL generates:
   score ≥ warn_threshold  → BLUR + warning
   score ≥ block_threshold → HIDE
 ```
-
-No mid-pipeline blocking. No wasted GPU cycles.
 
 ### Structured decision output
 
@@ -322,6 +522,13 @@ d.allowed            # True / False
 d.reason.layer       # "deterministic" | "ml" | "none"
 d.reason.rule        # "hard_block" | "content_rule" | "ml_classifier" | "pass"
 d.reason.confidence  # float 0.0–1.0
+```
+
+### Safety tests
+
+```bash
+pip install pytest
+python -m pytest tests/test_safety.py -v
 ```
 
 ---
@@ -345,16 +552,25 @@ Copy values into `safety_policy.json` to apply. Profiles are never auto-applied.
 
 **File:** [modules/n8n_integration.py](modules/n8n_integration.py)
 
-### Security model
+Automate generation from n8n workflows. Two modes — pick based on your setup.
 
-Every request uses HMAC-SHA256 — not a static token. This prevents replay attacks.
+### Which mode to use
+
+| Mode | When to use | How it works |
+|------|-------------|-------------|
+| Simple token | Local-only / testing | Set `"simple_token_mode": true`, send `X-CF-Signature: your-secret` as a plain header |
+| HMAC (recommended) | Any server / public endpoint | Full HMAC-SHA256 with replay protection and rate limiting |
+
+**Never use simple token mode on a public server.** It provides no replay protection.
+
+### Security model (HMAC mode)
 
 | Protection | Mechanism |
 |-----------|----------|
 | Signature | HMAC-SHA256(secret, `timestamp:nonce:body`) |
-| Replay prevention | Nonce stored for 10 minutes — each nonce accepted once only |
-| Timestamp drift | Requests > ±5 minutes old are rejected |
-| Payload size | 64KB cap (configurable) |
+| Replay prevention | Nonce stored 10 minutes — each nonce accepted once only |
+| Timestamp drift | Requests older than ±5 minutes rejected |
+| Payload size | 64 KB cap (configurable) |
 | Schema | Strict field whitelist — unknown fields ignored |
 | Rate limit | 30 requests / 60s per source IP (configurable) |
 
@@ -374,9 +590,6 @@ Every request uses HMAC-SHA256 — not a static token. This prevents replay atta
 }
 ```
 
-For local/simple use where signing is too complex, set `"simple_token_mode": true` — this
-accepts `X-CF-Signature: your-secret` as a plain string. Never use simple mode on a public server.
-
 **Step 2 — `webui.py`** (one line after Gradio app is created):
 
 ```python
@@ -384,10 +597,9 @@ from modules.n8n_integration import register_routes
 register_routes(app)
 ```
 
-**Step 3 — n8n signing (Code node):**
+**Step 3 — n8n signing (Code node, runs before HTTP Request):**
 
 ```javascript
-// n8n Code node — runs before HTTP Request
 const secret  = "your-secret-key";
 const body    = JSON.stringify($input.item.json);
 const ts      = String(Math.floor(Date.now() / 1000));
@@ -476,30 +688,23 @@ Body:    (from Code node output)
 | `complete` | Generation done, image base64 attached |
 | `queue_wait` | Job waited > 5s (alerting) |
 
-### Local vs server mode
-
-| Mode | Binds to | Auth |
-|------|---------|------|
-| Local | `localhost:7865` | HMAC always required |
-| Server (`--server --listen`) | All interfaces | HMAC always required |
-
 ---
 
 ## 7. Video Generation
 
 **Files:** [modules/video/](modules/video/)
 
-Same UI, same queue, same safety — video is a switchable output type.
+Same UI, same queue, same safety system — video is a switchable output type, not a separate tool.
 
-### UI concept
+### UI
 
 ```
 [ Image ]  [ Video ]          ← mode toggle
 
-Prompt:  ___________________________________
-Duration:    [ 2s ]  [ 4s ]  [ 6s ]  [ 10s ]
-FPS:         [ 12 ]  [ 24 ]
-Motion:      [ smooth ]  [ cinematic ]  [ handheld ]  [ zoom ]  [ orbit ]
+Prompt:   ___________________________________
+Duration:     [ 2s ]  [ 4s ]  [ 6s ]  [ 10s ]
+FPS:          [ 12 ]  [ 24 ]
+Motion:       [ smooth ]  [ cinematic ]  [ handheld ]  [ zoom ]  [ orbit ]
 ```
 
 Any generated image has an **Animate ▶** button. Clicking it sends that image and seed directly to the img2vid pipeline.
@@ -519,12 +724,12 @@ Any generated image has an **Animate ▶** button. Clicking it sends that image 
 
 ### Backends
 
-| Backend | Mode | Stability |
-|---------|------|---------|
-| SVD (Stable Video Diffusion) | img2vid | Best — recommended MVP |
-| AnimateDiff | text2vid + img2vid | Most flexible |
+| Backend | Mode | Notes |
+|---------|------|-------|
+| SVD (Stable Video Diffusion) | img2vid | Recommended for MVP |
+| AnimateDiff | text2vid + img2vid | More flexible |
 
-### Video reuses image pipeline — no duplication
+### How video reuses the image pipeline
 
 ```python
 # Image pipeline call (unchanged)
@@ -568,99 +773,9 @@ print(job.expanded)    # prompt + motion suffix
 
 ---
 
-## Installation
+## Safety Policy Config
 
-### Prerequisites
-
-- Python 3.10+
-- Git
-- NVIDIA/AMD GPU 4 GB+ VRAM, **or** Apple Silicon Mac 32 GB+ unified memory, **or** 16 GB+ system RAM
-
-### Option A — Local Mode
-
-**macOS / Linux:**
-```bash
-git clone https://github.com/FreddieSparrow/cookiefooocus.git
-cd cookiefooocus
-bash install_local.sh
-bash run.sh
-```
-
-**Windows:**
-```
-1. Clone or download the repo
-2. Double-click install_local.bat
-3. Double-click run_local.bat
-```
-
-### Option B — Server Mode (multi-user)
-
-**macOS / Linux:**
-```bash
-bash install_server.sh
-cp auth.json.example auth.json
-# Edit auth.json — change admin password
-bash run_server.sh
-```
-
----
-
-### Optional: Ollama (LLM prompt mode)
-
-Hardware requirements for Mode C (LLM):
-- Apple Silicon — 32 GB+ unified memory
-- PC — 26 GB+ RAM and 12 GB+ VRAM
-
-Falls back to BALANCED automatically with an explicit `fallback_reason` in the trace.
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull gemma4
-ollama serve
-```
-
----
-
-## Hardware Modes (First-Run Wizard)
-
-| # | Mode | Min requirement |
-|---|------|----------------|
-| 1 | GPU (VRAM) | 4 GB+ VRAM |
-| 2 | Low VRAM | < 4 GB VRAM |
-| 3 | CPU only | 64 GB+ RAM |
-| 4 | Auto-detect | — |
-| 5 | No VRAM / RAM | 16 GB+ DDR4/DDR5 |
-| 6 | Apple Silicon | 32 GB+ unified memory |
-
----
-
-## Content Safety System
-
-### Layer 1 — Deterministic (always active)
-
-| Rule | Catches |
-|------|---------|
-| Hard block CRITICAL | CSAM, WMD — alert written to disk |
-| Hard block | Deepfake nudity, weapons, injection |
-| Adult filter | Always on |
-| Intent patterns | Indirect undressing requests |
-| Fuzzy match | Edit-distance bypass attempts |
-
-### Layer 2 — ML (optional, edge cases)
-
-- DeBERTa v3 primary, fallback stack
-- Configurable threshold (default 0.80)
-- Never blocks deterministic decisions
-
-### Image moderation post-generation
-
-| Score | Action |
-|-------|--------|
-| < warn threshold | Show |
-| ≥ warn threshold | Blur + warning |
-| ≥ block threshold | Hide |
-
-### Safety policy config (`safety_policy.json`)
+**File:** `safety_policy.json`
 
 ```json
 {
@@ -682,13 +797,6 @@ ollama serve
     "rate_limit_rpm": 30
   }
 }
-```
-
-### Safety tests
-
-```bash
-pip install pytest
-python -m pytest tests/test_safety.py -v
 ```
 
 ---
@@ -732,12 +840,6 @@ After any code change: `python update_manifest.py`
 | NSFW check | `nsfw_check_ms` | 210 ms | 285 ms |
 | VRAM peak | `vram_peak_mb` | 7.2 GB | 7.8 GB |
 
-View live:
-
-```bash
-python -c "from modules.telemetry import telemetry; print(telemetry.dashboard())"
-```
-
 ---
 
 ## All Command-Line Flags
@@ -758,6 +860,32 @@ entry_with_update.py  [--server]
                       [--debug-mode] [--disable-image-log]
                       [--rebuild-hash-cache [THREADS]]
 ```
+
+---
+
+## Full Version Comparison (Fooocus → v1 → v2 → v2.5)
+
+| Feature | Upstream Fooocus | v1 | v2 | v2.5 (this) |
+|---------|-----------------|----|----|-------------|
+| **Prompt expansion** | GPT-2 only, no cache | Ollama or GPT-2, LRU cache | 3 explicit modes (RAW / BALANCED / LLM) | **Same + PromptTrace: `mode_used`, `fallback_reason` always set** |
+| **Content filter** | None | 7-layer pipeline (regex + ML + fuzzy), mixed into pipeline | **2-layer: deterministic (L1) + ML optional (L2) — clean separation** | Same |
+| **Image moderation** | Basic censor | NSFW classifier blocks mid-generation | **Post-generation only: SHOW / BLUR / HIDE** | Same |
+| **Caching** | None | Single unified LRU cache (all lifecycles mixed) | **2 separate caches: prompt (LRU/no-TTL), nsfw (TTL 300s)** | Same |
+| **Queue** | None (OOM risk) | Semaphore, FIFO, no priority | **Priority queue: user > batch > background, starvation prevention, cancellation** | Same |
+| **VRAM management** | None | None | None | **VRAM governor: pre-flight check + auto step/resolution/precision downscale** |
+| **Safety decisions** | None | Silent block/warn | **Structured SafetyDecision: `layer`, `rule`, `confidence`** | Same |
+| **Performance observability** | None | None | None | **Telemetry: avg + p50 + p95 per stage + VRAM peak tracking** |
+| **Authentication** | Plaintext passwords | **PBKDF2-HMAC-SHA256, 600k iterations, 32-byte salt** | Same | Same |
+| **Session tokens** | None | **256-bit, 1-hour TTL** | Same | Same |
+| **Automation / API** | None | None | None | **n8n: HMAC-SHA256 + replay protection + rate limiting** |
+| **Video generation** | None | None | None | **SVD + AnimateDiff + 8 motion presets — same pipeline reused** |
+| **Policy config** | Hardcoded | `safety_policy.json` (thresholds only) | Same | **Policy profiles: balanced / creative / strict / api_safe** |
+| **Architecture** | Monolithic | Modular but tightly coupled | **3-layer: core / orchestration / policy — no cross-layer calls** | Same |
+| **Controller** | None | Single class (bottleneck risk) | **Split: scheduler + resource_manager + cache — no cross-blocking** | Same |
+| **Apple Silicon** | Partial | **Mode 6: MPS + Metal** | Same | Same |
+| **Safe model loading** | Raw `torch.load()` | **Pickle allowlist** | Same | Same |
+| **Security manifest** | None | **SHA-256 boot verification of `content_filter.py`** | Same | Same |
+| **Auto-update** | None | **Background git pull, channel config** | Same | Same |
 
 ---
 
