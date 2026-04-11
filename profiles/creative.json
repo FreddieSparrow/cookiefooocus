@@ -1,0 +1,20 @@
+{
+  "_description": "Creative profile. Minimal filtering, LLM expansion enabled, maximum artistic freedom. Not for public-facing deployments.",
+  "prompt_filter": {
+    "ml_threshold": 0.95,
+    "risk_threshold": 12,
+    "ml_enabled": false
+  },
+  "image_filter": {
+    "nsfw_block_threshold": 0.90,
+    "nsfw_warn_threshold": 0.70,
+    "age_check_enabled": true
+  },
+  "prompt_engine": {
+    "default_mode": "llm"
+  },
+  "generation": {
+    "max_concurrent": 2,
+    "queue_timeout_seconds": 300
+  }
+}

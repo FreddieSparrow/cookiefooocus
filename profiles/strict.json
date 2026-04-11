@@ -1,0 +1,21 @@
+{
+  "_description": "Strict profile. Full moderation stack, low thresholds, logging enabled. For shared/public deployments.",
+  "prompt_filter": {
+    "ml_threshold": 0.60,
+    "risk_threshold": 3,
+    "ml_enabled": true
+  },
+  "image_filter": {
+    "nsfw_block_threshold": 0.35,
+    "nsfw_warn_threshold": 0.15,
+    "age_check_enabled": true
+  },
+  "prompt_engine": {
+    "default_mode": "balanced"
+  },
+  "generation": {
+    "max_concurrent": 1,
+    "queue_timeout_seconds": 900
+  },
+  "debug_trace": true
+}
