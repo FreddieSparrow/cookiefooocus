@@ -52,7 +52,7 @@ That's it for local use. The rest of this README covers hardware tuning, optiona
 | **Original Fooocus** | SDXL UI by lllyasviel. No queue, no safety, no API. Crashes on low VRAM. |
 | **Cookie-Fooocus v1** | Added Ollama/GPT-2 prompt expansion, 7-layer safety pipeline, basic caching, PBKDF2 auth, Apple Silicon (Mode 6). Modular structure but tightly coupled. |
 | **Cookie-Fooocus v2** | Full architecture redesign. 3-layer separation (core / orchestration / policy). 3-mode prompt engine with PromptTrace. 2-layer safety with clean interfaces. Priority queue replacing semaphore. Structured SafetyDecision output. |
-| **Cookie-Fooocus v2.5 (this)** | Stabilisation + safety hardening. Predictive VRAM model with EWA feedback correction. L1/L2 (memory + SQLite) cache hierarchy. Decision chain logging per job. Telemetry threshold monitoring with opt-in auto-tune. Per-user queue limits. Video frame cost cap. n8n disabled by default. STANDARD (GPT-2) prompt mode. Multi-GPU topology layer. Distributed worker protocol. Cache lifecycle hardening (size/age eviction + compaction). VRAM calibration tool. Safety Explainability UI. Server mode blocked on macOS. |
+| **Cookie-Fooocus v2.5 (this)** | Stabilisation + safety hardening. Predictive VRAM model with EWA feedback correction. L1/L2 (memory + SQLite) cache hierarchy. Decision chain logging per job. Telemetry threshold monitoring with opt-in auto-tune. Per-user queue limits. Video frame cost cap. n8n disabled by default. STANDARD (GPT-2) prompt mode. Multi-GPU topology layer. Distributed worker protocol. Cache lifecycle hardening (size/age eviction + compaction). VRAM calibration tool. Safety Explainability UI. |
 
 ---
 
@@ -241,7 +241,8 @@ bash run.sh
 
 ### Option B — Server Mode (multi-user)
 
-**macOS / Linux:**
+**Linux only. Requires a CUDA GPU. Not supported on macOS / Apple Silicon.**
+
 ```bash
 bash install_server.sh
 cp auth.json.example auth.json
@@ -1071,9 +1072,9 @@ print(format_decision_chain_text(chain.to_dict()))
 html = format_decision_chain_html(chain.to_dict())
 ```
 
-### Server Mode: macOS Restriction
+### Server Mode: macOS / Apple Silicon
 
-`--server` mode now exits immediately on Apple Silicon / macOS with a clear error message. Server mode requires a Linux host with a CUDA GPU. Local mode (`bash run.sh`) continues to work normally on Mac.
+Server mode (`--server`) is not supported on macOS or Apple Silicon. It exits immediately with an error. Server mode requires a Linux host with a CUDA GPU. Local mode (`bash run.sh`) works normally on Mac.
 
 ---
 

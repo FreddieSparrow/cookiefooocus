@@ -344,8 +344,7 @@ bash run.sh</code></pre>
 
       <div class="tab-content" id="tab-server" style="display:none">
         <div class="install-warning">
-          ⚠️ <strong>Server mode requires Linux + CUDA GPU.</strong>
-          Not supported on macOS / Apple Silicon. Use <code>bash run.sh</code> for local mode on Mac.
+          ⚠️ <strong>Server mode requires Linux + CUDA GPU. Not supported on macOS / Apple Silicon.</strong>
         </div>
         <pre><code>bash install_server.sh
 cp auth.json.example auth.json
@@ -390,12 +389,12 @@ ollama serve</code></pre>
           <div class="error-fix">NSFW score above block threshold. Lower <code>nsfw_block_threshold</code> in <code>safety_policy.json</code> if the content is legitimate.</div>
         </div>
         <div class="error-card">
-          <div class="error-title">Very slow on Apple Silicon</div>
-          <div class="error-fix">You may be in CPU mode accidentally. Confirm Mode 6 is selected. Check startup logs for <code>mps</code>.</div>
+          <div class="error-title">--server on macOS / Apple Silicon</div>
+          <div class="error-fix">Server mode is not supported on macOS or Apple Silicon — it will not start. Use local mode instead: <code>bash run.sh</code>. Server mode requires Linux + CUDA GPU.</div>
         </div>
         <div class="error-card">
-          <div class="error-title">--server flag on macOS exits immediately</div>
-          <div class="error-fix">Server mode is not supported on Apple Silicon. Use local mode: <code>bash run.sh</code>. Server mode requires a Linux host with a CUDA GPU.</div>
+          <div class="error-title">Very slow on Apple Silicon</div>
+          <div class="error-fix">You may be in CPU mode accidentally. Confirm Mode 6 is selected. Check startup logs for <code>mps</code>.</div>
         </div>
       </div>
     </div>
